@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overschie — Gebiedsprofiel in cijfers</title>
+<script defer src="assets/chart.umd.js"></script>
+<link rel="stylesheet" href="assets/leaflet.css">
+<script defer src="assets/leaflet.js"></script>
+<style>
+  :root{
+    --asfalt:#22261F;
+    --asfalt-zacht:#3A4036;
+    --beton:#EFEEE6;
+    --beton-diep:#E3E1D4;
+    --markering:#E8B006;   /* wegmarkering-geel: het signatuurelement */
+    --schie:#2E6F8E;       /* water & OV */
+    --polder:#557A46;      /* groen & fiets */
+    --wit:#FAFAF5;
+    --rood:#B0452F;        /* knelpunten */
+    --grid:rgba(34,38,31,.12);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--beton);
+    color:var(--asfalt);
+    font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
+    font-size:16px;line-height:1.55;
+    font-variant-numeric:tabular-nums;
+  }
+
+  /* ---------- signatuur: de A13 als wegmarkering-spine ---------- */
+  .spine{
+    position:fixed;left:34px;top:0;bottom:0;width:6px;
+    background:repeating-linear-gradient(
+      to bottom, var(--markering) 0 42px, transparent 42px 70px);
+    opacity:.85;z-index:1;
+  }
+  .spine-progress{
+    position:fixed;left:33px;top:0;width:8px;height:0;
+    background:var(--asfalt);z-index:2;transition:height .1s linear;
+    mix-blend-mode:multiply;
+  }
+  @media(max-width:820px){.spine,.spine-progress,.hm{display:none}}
+
+  main{max-width:880px;margin:0 auto;padding:0 24px 120px 24px;position:relative;z-index:3}
+  @media(min-width:821px){main{padding-left:110px}}
+
+  /* hectometerbordje per sectie */
+  .hm{
+    position:absolute;left:-96px;width:64px;
+    background:#1E6B34;color:#fff;border-radius:6px;
+    text-align:center;font-weight:700;font-size:12px;
+    padding:5px 4px;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);
+    letter-spacing:.04em;
+  }
+  .hm span{display:block;font-size:15px}
+
+  section{position:relative;padding:72px 0 24px 0;border-bottom:1px solid var(--grid)}
+  .eyebrow{
+    font-size:12px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--asfalt-zacht);margin-bottom:10px;
+  }
+  h1{
+    font-size:clamp(52px,9vw,104px);font-weight:900;letter-spacing:-.035em;
+    line-height:.95;text-transform:uppercase;
+  }
+  h1 .accent{color:transparent;-webkit-text-stroke:2px var(--asfalt)}
+  h2{font-size:clamp(26px,4vw,38px);font-weight:800;letter-spacing:-.02em;margin-bottom:14px;line-height:1.1}
+  h3{font-size:17px;font-weight:700;margin:26px 0 8px 0}
+  p.lead{font-size:19px;max-width:62ch;color:var(--asfalt-zacht)}
+  p{max-width:68ch}
+  p + p{margin-top:10px}
+
+  /* fade-in bij scroll, met reduced-motion respect */
+  .reveal{opacity:0;transform:translateY(14px);transition:opacity .5s ease,transform .5s ease}
+  .reveal.on{opacity:1;transform:none}
+  @media(prefers-reduced-motion:reduce){
+    .reveal{opacity:1;transform:none;transition:none}
+    html{scroll-behavior:auto}
+  }
+
+  /* kerncijfer-strip */
+  .strip{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:1px;background:var(--grid);border:1px solid var(--grid);
+    margin:34px 0 6px 0;
+  }
+  .strip .cell{background:var(--wit);padding:16px 14px}
+  .cell .num{font-size:30px;font-weight:900;letter-spacing:-.02em;line-height:1}
+  .cell .lbl{font-size:12.5px;color:var(--asfalt-zacht);margin-top:6px;line-height:1.3}
+  .cell .src{font-size:10.5px;color:#9a9a8d;margin-top:4px}
+
+  .chart-box{
+    background:var(--wit);border:1px solid var(--grid);
+    padding:20px 18px 12px 18px;margin:22px 0;
+  }
+  .chart-box h4{font-size:14px;font-weight:700;margin-bottom:2px}
+  .chart-box .sub{font-size:12px;color:var(--asfalt-zacht);margin-bottom:12px}
+  .chart-wrap{position:relative;height:300px}
+  .chart-wrap.tall{height:340px}
+  .foot{font-size:11px;color:#9a9a8d;margin-top:10px}
+
+  /* buurtenkaarten */
+  .buurten{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:22px 0}
+  .buurt{
+    background:var(--wit);border:1px solid var(--grid);padding:16px;cursor:pointer;
+    transition:border-color .2s, box-shadow .2s;border-left:5px solid var(--beton-diep);
+  }
+  .buurt:hover,.buurt:focus-visible{border-left-color:var(--markering);box-shadow:0 2px 10px rgba(0,0,0,.07);outline:none}
+  .buurt.open{border-left-color:var(--markering)}
+  .buurt .naam{font-weight:800;font-size:15px}
+  .buurt .tag{font-size:11px;color:var(--asfalt-zacht);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+  .buurt .meer{font-size:13.5px;color:var(--asfalt-zacht);margin-top:8px;display:none}
+  .buurt.open .meer{display:block}
+
+  /* vergelijk-toggle */
+  .toggle{
+    display:inline-flex;gap:0;border:1px solid var(--asfalt);margin:6px 0 4px 0;
+  }
+  .toggle button{
+    background:var(--wit);border:none;padding:7px 14px;font:inherit;font-size:13px;
+    font-weight:600;cursor:pointer;color:var(--asfalt)
+  }
+  .toggle button.actief{background:var(--asfalt);color:var(--wit)}
+  .toggle button:focus-visible{outline:2px solid var(--schie);outline-offset:-2px}
+
+  /* knelpunten & duiding */
+  .knel{background:var(--wit);border-left:5px solid var(--rood);padding:14px 16px;margin:12px 0}
+  .knel b{color:var(--rood)}
+  .duiding{background:var(--asfalt);color:var(--beton);padding:26px 24px;margin:26px 0}
+  .duiding h3{color:var(--markering);margin-top:0}
+  .duiding p{color:#D8D6C8}
+  .duiding ul{margin:8px 0 0 18px;color:#D8D6C8}
+  .duiding li{margin:6px 0;max-width:65ch}
+
+  .status{font-size:12px;padding:2px 8px;border-radius:3px;font-weight:700;vertical-align:middle}
+  .status.cbs{background:#DCE8DC;color:#2C5A2C}
+  .status.schatting{background:#F3E3C2;color:#7A5A10}
+  .status.ontbreekt{background:#F0D6CF;color:#8A3322}
+  /* aggregatieniveau-badge: op welk niveau is dit cijfer gemeten? */
+  .status.niveau{background:#DCE3E8;color:#274B5E;text-transform:uppercase;letter-spacing:.06em;font-size:10.5px}
+
+  table.agenda{width:100%;border-collapse:collapse;background:var(--wit);border:1px solid var(--grid);font-size:14px}
+  table.agenda th{text-align:left;padding:10px 12px;background:var(--beton-diep);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+  table.agenda td{padding:10px 12px;border-top:1px solid var(--grid);vertical-align:top}
+
+  .bronnen{font-size:12.5px;color:var(--asfalt-zacht)}
+  .bronnen li{margin:5px 0}
+  a{color:var(--schie)}
+</style>
+</head>
+<body>
+
+<div class="spine" aria-hidden="true"></div>
+<div class="spine-progress" id="progress" aria-hidden="true"></div>
+
+<main>
+
+<!-- ============ HERO ============ -->
+<section id="s0" style="border-bottom:4px solid var(--asfalt)">
+  <div class="hm" aria-hidden="true">A13<span>0,0</span></div>
+  <div class="eyebrow">Gebiedsprofiel · Gemeente Rotterdam · Mobiliteit</div>
+  <h1>Over<span class="accent">schie</span></h1>
+  <p class="lead" style="margin-top:18px">
+    Een oud Schie-dorp, in 1941 geannexeerd, dat vandaag wordt doorsneden door de A13,
+    grenst aan Rotterdam The Hague Airport en tegelijk het grootste veenweidegebied
+    binnen de gemeente herbergt. Dit profiel beschrijft wie er wonen, hoe ze wonen
+    en wat dat betekent voor mobiliteit.
+  </p>
+  <div class="strip reveal">
+    <div class="cell"><div class="num">20.693</div><div class="lbl">inwoners (1-1-2025)</div><div class="src">BRP / wijkprofiel</div></div>
+    <div class="cell"><div class="num">+30%</div><div class="lbl">bevolkingsgroei 2013–2026</div><div class="src">CBS</div></div>
+    <div class="cell"><div class="num">15,1 km²</div><div class="lbl">oppervlakte, grotendeels polder</div><div class="src">CBS</div></div>
+    <div class="cell"><div class="num">8.795</div><div class="lbl">huishoudens</div><div class="src">CBS 2024</div></div>
+    <div class="cell"><div class="num">3,8 km</div><div class="lbl">gem. afstand tot treinstation</div><div class="src">CBS nabijheid 2025 (86270NED)</div></div>
+    <div class="cell"><div class="num">€ 364k</div><div class="lbl">gemiddelde WOZ-waarde</div><div class="src">CBS</div></div>
+  </div>
+</section>
+
+<!-- ============ GEBIED ============ -->
+<section id="s1">
+  <div class="hm" aria-hidden="true">A13<span>1,0</span></div>
+  <div class="eyebrow">01 · Het gebied</div>
+  <h2>Zes buurten, drie gezichten</h2>
+  <p>Overschie is klein qua stedelijk gebied maar zeer gemêleerd: een historische dorpskern
+     aan de Schie, naoorlogse flats in Kleinpolder, villa's, bedrijventerrein en een weids
+     veenweidegebied in het noorden. Klik op een buurt voor karakteristiek.</p>
+  <div class="buurten reveal" id="buurten"></div>
+  <div class="knel"><b>Ligging:</b> de A13 loopt dwars door het bewoonde deel en scheidt
+     Kleinpolder van de dorpskern. Het gebied wordt verder begrensd door de A20, de nieuwe
+     A16 en het vliegveld. Kruisingen en omrijfactoren staan in sectie 06.</div>
+</section>
+
+<!-- ============ BINNEN DE WIJK ============ -->
+<section id="s1b">
+  <div class="hm" aria-hidden="true">A13<span>1,8</span></div>
+  <div class="eyebrow">02 · Binnen de wijk</div>
+  <h2>Eén wijkgemiddelde bestaat niet</h2>
+  <p>Het wijkgemiddelde (inkomen € 41.000, WOZ € 364.000) middelt drie totaal verschillende
+     buurten uit. Zestienhoven verdient bijna twee keer zoveel als Kleinpolder en woont in
+     huizen die bijna drie keer zoveel waard zijn. Kies een indicator om de spreiding te zien.</p>
+
+  <div class="chart-box reveal">
+    <h4>Buurtvergelijking <span class="status niveau">buurt</span>
+      <span class="toggle" role="group" aria-label="Kies indicator" id="buurtToggle"></span></h4>
+    <div class="sub" id="buurtSub"></div>
+    <div class="chart-wrap"><canvas id="chBuurt"></canvas></div>
+    <div class="foot" id="buurtFoot"></div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Kaart — gekozen indicator per buurt <span class="status niveau">buurt</span>
+      <span style="font-weight:400;font-size:12.5px;margin-left:12px">
+        <label style="cursor:pointer;margin-right:12px">
+          <input type="checkbox" id="ovToggle" disabled> OV-haltes (GTFS)</label>
+        <label style="cursor:pointer;margin-right:12px">
+          <input type="checkbox" id="fietsToggle" disabled> vrijliggend fietspad (OSM)</label>
+        <label style="cursor:pointer;margin-right:6px">
+          <input type="checkbox" id="wmsToggle"> CBS 100×100&nbsp;m-laag:</label>
+        <select id="wmsStijl" style="font:inherit;font-size:12px;max-width:220px"></select>
+      </span>
+    </h4>
+    <div class="sub">Buurtvlakken (officiële CBS-geometrie via PDOK, CC0), donkerder = hogere
+      waarde van de gekozen indicator; grijs = geen buurtcijfer. Klik voor de waarde.
+      De CBS 100×100&nbsp;m-laag is een aparte onderlegger met eigen CBS-thema's in twee
+      groepen (bevolking &amp; wonen, bereikbaarheid); legenda onder de kaart. Zolang de laag
+      aanstaat tonen de buurtvlakken alleen hun omtrek en toont een klik op de kaart de
+      CBS-celwaarden van dat vierkant. Bij WOZ, huishoudensgrootte en
+      treinafstand springt de laag automatisch mee met de gekozen indicator; bij de andere
+      indicatoren verschijnt een melding dat er geen 100&nbsp;m-equivalent bestaat.</div>
+    <div id="kaart" style="height:420px;border:1px solid var(--grid)" role="img"
+         aria-label="Kaart van Overschie met indicatorwaarden per buurt"></div>
+    <div class="foot" id="buurtLegenda" style="display:none"></div>
+    <div class="foot" id="wmsLegenda" style="display:none"></div>
+    <div class="foot" id="kaartFout" style="color:#B0452F"></div>
+    <div class="foot">Ondergrond: CartoDB Positron (© OpenStreetMap-bijdragers © CARTO).
+      De 100×100m-laag laadt live van PDOK (CBS vierkantstatistieken, laag
+      <code>vierkant_100m</code>) en vereist internet; de nieuwste jaargang wordt bij het
+      laden automatisch gekozen (het aankruisvakje wordt dan pas actief). De laag is alleen
+      zichtbaar bij voldoende inzoomen (schaal 1:150.000, ± zoomniveau 12 en dieper);
+      ver uitgezoomd verdwijnt hij vanzelf. In een preview-venster kunnen kaarttegels
+      geblokkeerd zijn.</div>
+  </div>
+
+  <div class="strip reveal">
+    <div class="cell"><div class="num">2,6×</div><div class="lbl">inkomensverschil hoogste vs. laagste buurt (Zestienhoven vs. Landzicht)</div><div class="src">CBS/IIVS</div></div>
+    <div class="cell"><div class="num">+282%</div><div class="lbl">inwonersgroei Zestienhoven 2013–2025 — vrijwel álle wijkgroei</div><div class="src">CBS</div></div>
+    <div class="cell"><div class="num">1,2 vs 0,7</div><div class="lbl">auto's per huishouden: Zestienhoven vs. Kleinpolder</div><div class="src">CBS KWB 2025 (86165NED)</div></div>
+    <div class="cell"><div class="num">3% vs 14%</div><div class="lbl">huishoudens rond sociaal minimum: Zestienhoven vs. Landzicht</div><div class="src">CBS</div></div>
+  </div>
+
+  <div class="knel"><b>Wat het wijkgemiddelde niet laat zien:</b> tussen de buurten loopt
+     het inkomen per ontvanger uiteen van € 28.000 tot € 74.000, het autobezit van 0,7 tot
+     1,6 auto per huishouden en het aandeel huishoudens rond het sociaal minimum van 3% tot
+     14%. Elk cijfer dat op wijkniveau wordt gerapporteerd, middelt deze spreiding uit.</div>
+</section>
+
+<!-- ============ BEVOLKING ============ -->
+<section id="s2">
+  <div class="hm" aria-hidden="true">A13<span>2,4</span></div>
+  <div class="eyebrow">03 · Bevolking</div>
+  <h2>Een wijk die hard groeit</h2>
+  <p>Overschie groeide van ruim 16.000 inwoners in 2013 naar ruim 21.000 in 2026 — zo'n 30%,
+     vooral door woningbouw rond Park Zestienhoven.</p>
+
+  <div class="chart-box reveal">
+    <h4>Inwoners per peiljaar <span class="status niveau">wijk</span></h4>
+    <div class="sub">Alleen gepubliceerde peiljaren; tussenliggende jaren zijn niet getoond om schijnprecisie te vermijden.</div>
+    <div class="chart-wrap"><canvas id="chGroei"></canvas></div>
+    <div class="foot">Bron: CBS Kerncijfers wijken en buurten, alle jaargangen sinds 2013
+      (OData, gegenereerd — js/profiel.js; nieuwe jaargangen verschijnen automatisch).</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Leeftijdsopbouw <span class="status niveau">wijk</span></h4>
+    <div class="sub">Aandeel inwoners per leeftijdsklasse, wijk Overschie.</div>
+    <div class="chart-wrap"><canvas id="chLeeftijd"></canvas></div>
+    <div class="foot">Bron: CBS KWB, nieuwste jaargang (OData, gegenereerd — js/profiel.js);
+      aandelen berekend uit de gepubliceerde aantallen per leeftijdsklasse.</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Huishoudenssamenstelling <span class="status niveau">wijk</span></h4>
+    <div class="sub">8.795 huishoudens, wijk Overschie.</div>
+    <div class="chart-wrap"><canvas id="chHuish"></canvas></div>
+    <div class="foot">Bron: CBS KWB, nieuwste jaargang (OData, gegenereerd — js/profiel.js).</div>
+  </div>
+</section>
+
+<!-- ============ SOCIAAL-ECONOMISCH ============ -->
+<section id="s3">
+  <div class="hm" aria-hidden="true">A13<span>3,4</span></div>
+  <div class="eyebrow">04 · Sociaal-economisch</div>
+  <h2>Bovengemiddeld inkomen, gemengd opgeleid</h2>
+  <p>Anders dan het Rotterdamse gemiddelde ligt het inkomen in Overschie <em>boven</em> het
+     landelijk gemiddelde. Het opleidingsniveau is vrijwel gelijk verdeeld over laag,
+     middelbaar en hoog — een brede middenklasse-wijk.</p>
+
+  <div class="chart-box reveal">
+    <h4>Gemiddeld inkomen <span class="status niveau">wijk / land</span> <span class="toggle" role="group" aria-label="Kies inkomensmaat">
+      <button class="actief" data-ink="ontvanger">per inkomensontvanger</button>
+      <button data-ink="inwoner">per inwoner</button></span></h4>
+    <div class="sub">Overschie vergeleken met Nederland (× € 1.000 per jaar).</div>
+    <div class="chart-wrap"><canvas id="chInkomen"></canvas></div>
+    <div class="foot">Bron: CBS regionale inkomensstatistiek via KWB (OData, gegenereerd —
+      js/profiel.js; nieuwste jaargang waarin de wijkrij gevuld is).</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Opleidingsniveau (15–75 jaar) <span class="status niveau">wijk</span></h4>
+    <div class="sub">Hoogst behaald onderwijsniveau, peildatum 1 oktober 2024.</div>
+    <div class="chart-wrap"><canvas id="chOpleiding"></canvas></div>
+    <div class="foot">Bron: CBS KWB (OData, gegenereerd — js/profiel.js).
+      Laag = t/m vmbo/mbo-1 · Middelbaar = havo/vwo/mbo 2-4 · Hoog = hbo/wo;
+      aandeel 15-75-jarigen met vastgesteld onderwijsniveau.</div>
+  </div>
+
+  <div class="strip reveal">
+    <div class="cell"><div class="num">64%</div><div class="lbl">van de inwoners heeft betaald werk</div><div class="src">CBS (NL: 65%)</div></div>
+    <div class="cell"><div class="num">22%</div><div class="lbl">ontvangt een uitkering, grootste groep AOW</div><div class="src">CBS</div></div>
+    <div class="cell"><div class="num">57%</div><div class="lbl">herkomst Nederland (Rotterdam: ±50%)</div><div class="src">CBS 2025</div></div>
+    <div class="cell"><div class="num">18%</div><div class="lbl">van de werkenden is zelfstandige</div><div class="src">CBS</div></div>
+  </div>
+</section>
+
+<!-- ============ WONEN ============ -->
+<section id="s4">
+  <div class="hm" aria-hidden="true">A13<span>4,2</span></div>
+  <div class="eyebrow">05 · Wonen</div>
+  <h2>Van naoorlogse flat tot poldervilla</h2>
+  <p>Bijna 9.000 woningen met een gemiddelde WOZ-waarde van € 364.000. De energielabels
+     verraden de tweedeling: veel nieuwbouw met label A (Park Zestienhoven) naast een
+     grote naoorlogse voorraad met label C–E (Kleinpolder).</p>
+  <div class="strip reveal">
+    <div class="cell"><div class="num">8.924</div><div class="lbl">woningen</div><div class="src">CBS/BAG</div></div>
+    <div class="cell"><div class="num">29%</div><div class="lbl">energielabel A — nieuwbouw</div><div class="src">RVO</div></div>
+    <div class="cell"><div class="num">26%</div><div class="lbl">label C of E — naoorlogse voorraad</div><div class="src">RVO</div></div>
+    <div class="cell"><div class="num">−28%</div><div class="lbl">gasverbruik t.o.v. landelijk gemiddelde</div><div class="src">CBS/netbeheer</div></div>
+  </div>
+</section>
+
+<!-- ============ MOBILITEIT ============ -->
+<section id="s5">
+  <div class="hm" aria-hidden="true">A13<span>5,5</span></div>
+  <div class="eyebrow">06 · Mobiliteit</div>
+  <h2>Afstanden, OV-aanbod en netwerk</h2>
+  <p>Dagelijkse voorzieningen liggen gemiddeld binnen ± 1 km van het woonadres; het
+     dichtstbijzijnde treinstation op 3,8 km. Binnen de wijk ligt geen trein- of
+     metrostation; metrostation Meijersplein (lijn E) ligt direct buiten de wijkgrens
+     bij Park Zestienhoven. De wijk heeft directe opritten naar de A13 en A20.</p>
+
+  <div class="chart-box reveal">
+    <h4>Gemiddelde afstand tot voorzieningen <span class="status niveau">wijk</span></h4>
+    <div class="sub">Kilometers over de weg vanaf woonadres. Per buurt loopt de afstand tot het
+      treinstation uiteen van 3,4 tot 6,5 km — zie de kaartindicator in sectie 02.</div>
+    <div class="chart-wrap"><canvas id="chNabij"></canvas></div>
+    <div class="foot">Bron: CBS Nabijheidsstatistieken 2025 (tabel 86270NED, jaarlijks; het script
+      pakt automatisch de nieuwste jaargang). Afstanden over de weg; feitelijke loop-/fietsroutes
+      kunnen door barrières langer zijn (zie omrijfactor hieronder).</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>OV-aanbod: lijnen door of langs de wijk <span class="status niveau">halte</span></h4>
+    <div class="sub">Geteld uit de landelijke GTFS-dienstregeling (NDOV/OVapi); ritten van één
+      doordeweekse dag, beide richtingen samen. Lijnvoering en haltes op de kaart hieronder;
+      haltes ook als kaartlaag in sectie 02.</div>
+    <table class="agenda" id="ovTabel">
+      <thead><tr><th>Lijn</th><th>Traject</th><th>Ritten/dag</th><th>Eerste–laatste</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="strip" id="ovFeiten" style="margin-top:12px"></div>
+    <div class="foot" id="ovFoot">js/ov.js niet geladen — draai <code>uv run scripts/bouw_data.py</code>.</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Vertrekken per uur — spits en dal <span class="status niveau">halte</span></h4>
+    <div class="sub">Alle vertrekken vanaf haltes binnen de wijkgrens, gestapeld per
+      vervoerwijze, op de peildatum (één doordeweekse dag). De ochtend- en avondspits
+      en de avonddaluren zijn direct afleesbaar.</div>
+    <div class="chart-wrap"><canvas id="chSpits"></canvas></div>
+    <div class="foot" id="spitsFoot">js/ov.js zonder uurprofiel geladen —
+      draai <code>uv run scripts/bouw_data.py --alleen ov</code>.</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Kaart — OV-lijnen en haltes <span class="status niveau">halte</span></h4>
+    <div class="sub">Lijnvoering uit de landelijke GTFS-dienstregeling: per lijn en richting de
+      meest gereden route, afgekapt op ±4 km rond de wijk. Lijndikte = ritten per dag,
+      haltegrootte = vertrekken per dag; grijze haltes liggen buiten de wijkgrens.
+      Klik op een lijn of halte voor details.</div>
+    <div id="kaartOVToggles" style="margin:4px 0 10px"></div>
+    <div id="kaartOV" style="height:420px;border:1px solid var(--grid)" role="img"
+         aria-label="Kaart met OV-lijnen en haltes in en rond de wijk"></div>
+    <div class="foot" id="kaartOVFoot">js/ov.js niet of zonder lijngeometrie geladen —
+      draai <code>uv run scripts/bouw_data.py --alleen ov</code>.</div>
+  </div>
+
+  <h3>Netwerk en barrières <span class="status niveau">wijk</span></h3>
+  <p>De A13 doorsnijdt het bewoonde deel van de wijk en scheidt Kleinpolder van de dorpskern;
+     de A20 en de nieuwe A16 begrenzen de wijk aan de zuid- en noordoostzijde. Onderstaande
+     cijfers zijn berekend op het OpenStreetMap-netwerk.</p>
+  <div class="strip reveal" id="infraStrip"></div>
+  <div class="foot" id="infraFoot">js/infra.js niet geladen — draai <code>uv run scripts/bouw_data.py</code>.</div>
+
+  <div class="chart-box reveal" style="margin-top:18px">
+    <h4>Kaart — vrijliggend fietsnetwerk <span class="status niveau">wijk</span></h4>
+    <div class="sub">Vrijliggende fietspaden binnen de wijk volgens OpenStreetMap (groen);
+      stippellijn = wijkgrens. Goed zichtbaar is waar het netwerk de A13 en A20 kruist —
+      en waar niet. Ook als laag op de kaart in sectie 02. Optioneel eroverheen: de
+      RIVM-jaargemiddeldekaart luchtkwaliteit (klik met actieve laag voor de waarde
+      ter plekke).</div>
+    <div style="margin:4px 0 10px">
+      <label style="cursor:pointer;margin-right:6px">
+        <input type="checkbox" id="luchtToggle" disabled> luchtkwaliteit (RIVM/NSL):</label>
+      <select id="luchtStof" style="font:inherit;font-size:12px">
+        <option value="rivm_jaargemiddeld_NO2_actueel">NO₂ jaargemiddelde</option>
+        <option value="rivm_jaargemiddeld_PM25_actueel">PM2,5 jaargemiddelde</option>
+      </select>
+    </div>
+    <div id="kaartFiets" style="height:420px;border:1px solid var(--grid)" role="img"
+         aria-label="Kaart met vrijliggende fietspaden binnen de wijk"></div>
+    <div class="foot" id="luchtLegenda" style="display:none"></div>
+    <div class="foot" id="kaartFietsFoot">js/infra.js niet geladen —
+      draai <code>uv run scripts/bouw_data.py --alleen infra</code>.</div>
+  </div>
+
+  <div class="chart-box reveal" style="margin-top:18px">
+    <h4>Kaart — geregistreerde verkeersongevallen <span class="status niveau">locatie</span></h4>
+    <div class="sub">Door de politie geregistreerde ongevallen binnen de wijkgrens (BRON,
+      Rijkswaterstaat). Rood = dodelijk, geel = letsel, grijs = uitsluitend materiële
+      schade (standaard uit — verreweg de grootste en minst volledige categorie).
+      Klik op een punt voor de details.</div>
+    <div id="ongevalToggles" style="margin:4px 0 10px"></div>
+    <div id="kaartOngeval" style="height:420px;border:1px solid var(--grid)" role="img"
+         aria-label="Kaart met geregistreerde verkeersongevallen in de wijk"></div>
+    <div class="strip" id="ongevalStrip" style="margin-top:12px"></div>
+    <div class="foot" id="ongevalFoot">js/ongevallen.js niet geladen —
+      draai <code>uv run scripts/bouw_data.py --alleen ongevallen</code>.</div>
+  </div>
+
+  <h3 style="margin-top:34px">Datastatus mobiliteitsindicatoren <span class="status cbs">verwerkt</span> <span class="status schatting">deels</span> <span class="status ontbreekt">aan te vullen</span></h3>
+  <table class="agenda reveal">
+    <tr><th>Indicator</th><th>Status</th><th>Bron / vervolgactie</th></tr>
+    <tr><td>Nabijheid voorzieningen &amp; station (per buurt)</td><td><span class="status cbs">verwerkt</span></td><td>CBS Nabijheidsstatistieken 2024 (86134NED, jaarlijks, OData) — in dit dashboard.</td></tr>
+    <tr><td>Auto's per huishouden (per buurt)</td><td><span class="status cbs">verwerkt</span></td><td>CBS Kerncijfers wijken en buurten 2025 (86165NED, jaarlijks, OData) — vervangt de eerdere RDW-afleiding.</td></tr>
+    <tr><td>Verdeling 0/1/2+ auto's per huishouden</td><td><span class="status ontbreekt">aan te vullen</span></td><td>Alleen in incidentele CBS-maatwerktabellen (geen jaarlijkse open bron); bewust niet opgenomen.</td></tr>
+    <tr><td>Modal split verplaatsingen</td><td><span class="status cbs">verwerkt</span></td><td>Wijkniveau via ODiN-microdata 2022–2023 gepoold (CBS/DANS, sectie 07); provinciereferentie via StatLine 84710NED (jaarlijks). Reguliere publicatie kent geen wijkcijfer.</td></tr>
+    <tr><td>OV-aanbod: haltes, lijnen, ritfrequenties</td><td><span class="status cbs">verwerkt</span></td><td>GTFS NDOV/OVapi (dagelijks ververst) — in dit dashboard.</td></tr>
+    <tr><td>Barrièrewerking snelwegen (kruisingen, omrijfactor fiets)</td><td><span class="status cbs">verwerkt</span></td><td>Berekend op OSM-netwerk (doorlopend bijgewerkt) — in dit dashboard.</td></tr>
+    <tr><td>Verkeersongevallen (locaties, afloop)</td><td><span class="status cbs">verwerkt</span></td><td>BRON via Rijkswaterstaat WFS (CC0, jaarlijkse publicatie; rollend 3-jaarsvenster + lokale cache) — kaart in deze sectie.</td></tr>
+    <tr><td>Luchtkwaliteit (NO₂/PM2,5 jaargemiddelde)</td><td><span class="status cbs">verwerkt</span></td><td>RIVM/NSL-monitoringskaart via Atlas Leefomgeving (jaarlijkse release) — kaartlaag op de fietskaart.</td></tr>
+    <tr><td>Parkeerdruk</td><td><span class="status ontbreekt">aan te vullen</span></td><td>Gemeentelijke parkeerdrukmeting (nachttelling); geen open jaarlijkse bron.</td></tr>
+    <tr><td>Fietstellingen &amp; OV-instappers</td><td><span class="status ontbreekt">aan te vullen</span></td><td>Telpunten gemeente + RET-halteringsdata; niet openbaar op haltespecifiek niveau.</td></tr>
+  </table>
+</section>
+
+<!-- ============ VERPLAATSINGSPATRONEN (ODiN) ============ -->
+<section id="s5c">
+  <div class="hm" aria-hidden="true">A13<span>6,0</span></div>
+  <div class="eyebrow">07 · Verplaatsingspatronen</div>
+  <h2>Hoe, waarheen en wanneer bewoners reizen</h2>
+  <p>Gemeten reisgedrag uit het landelijke verplaatsingsonderzoek ODiN (CBS-microdata via
+     DANS), gefilterd op bewoners van de wijk en gepoold over meerdere jaren om op
+     wijkniveau te kunnen rapporteren. Ter vergelijking steeds hetzelfde cijfer voor alle
+     Rotterdammers uit dezelfde bron.</p>
+  <div class="knel" id="odinCaveat"><b>Representativiteit:</b> js/odin_wijk.js niet
+     geladen — draai <code>uv run scripts/bouw_data.py --alleen odin</code> (vereist de
+     lokale ODiN-microdatabestanden).</div>
+
+  <div class="chart-box reveal">
+    <h4>Modal split — aandeel verplaatsingen per vervoerwijze
+      <span class="status niveau">wijk · gemeente · provincie</span></h4>
+    <div class="sub" id="modalSub">js/odin_wijk.js of js/cbs_mobiliteit.js niet geladen.</div>
+    <div class="chart-wrap tall"><canvas id="chModal"></canvas></div>
+    <div class="foot" id="modalFoot"></div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Vervoerwijze naar afstand — hoe ver en waarmee
+      <span class="status niveau">wijk · gemeente</span></h4>
+    <div class="sub" id="afstandSub">js/odin_wijk.js zonder afstandsverdeling geladen —
+      draai <code>uv run scripts/bouw_data.py --alleen odin</code>.</div>
+    <div class="chart-wrap tall"><canvas id="chAfstand"></canvas></div>
+    <div class="foot" id="afstandFoot"></div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Motieven — waarom wordt er gereisd <span class="status niveau">wijk · gemeente</span></h4>
+    <div class="sub">Aandeel verplaatsingen per reismotief, wijkbewoners vs. alle Rotterdammers.</div>
+    <div class="chart-wrap tall"><canvas id="chMotief"></canvas></div>
+    <div class="foot">Bron: ODiN-microdata, zelfde pooling en onderdrukkingsregels als hierboven.</div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Bestemmingen — het daily urban system <span class="status niveau">wijk</span></h4>
+    <div class="sub">Waar eindigen de verplaatsingen van wijkbewoners? Lijndikte = aandeel;
+      alleen bestemmingen met ≥10 waarnemingen zijn benoemd.</div>
+    <div id="kaartBestemming" style="height:380px;border:1px solid var(--grid)" role="img"
+         aria-label="Kaart met de belangrijkste bestemmingen van wijkbewoners"></div>
+    <div class="strip" id="bestemmingStrip" style="margin-top:12px"></div>
+    <div class="foot" id="bestemmingFoot"></div>
+  </div>
+
+  <div class="chart-box reveal">
+    <h4>Vertrektijden per dagdeel <span class="status niveau">wijk · gemeente</span></h4>
+    <div class="sub">Verdeling van vertrektijden over de dag; uren zijn te dun voor deze steekproef.</div>
+    <div class="chart-wrap"><canvas id="chDagdeel"></canvas></div>
+    <div class="foot">Bron: ODiN-microdata, zelfde pooling en onderdrukkingsregels.</div>
+  </div>
+
+  <h3>Wie komt hierheen <span class="status niveau">wijk</span></h3>
+  <p>Spiegelbeeld: verplaatsingen van niet-bewoners met een bestemming in de wijk.</p>
+  <div class="strip reveal" id="bezoekersStrip"></div>
+</section>
+
+<!-- ============ VOORZIENINGEN ============ -->
+<section id="s5b">
+  <div class="hm" aria-hidden="true">A13<span>6,4</span></div>
+  <div class="eyebrow">08 · Voorzieningen</div>
+  <h2>Wat is er in de wijk</h2>
+  <p>Voorzieningen binnen de wijkgrens volgens OpenStreetMap, gegroepeerd in vijf
+     categorieën. Aantallen staan bij de categorie; klik op een punt voor de naam.</p>
+  <div class="chart-box reveal">
+    <h4>Voorzieningenkaart <span class="status niveau">locatie</span></h4>
+    <div id="voorzToggles" style="margin:6px 0 10px 0"></div>
+    <div id="kaartVoorz" style="height:420px;border:1px solid var(--grid)" role="img"
+         aria-label="Kaart met voorzieningen in de wijk per categorie"></div>
+    <div class="foot" id="voorzFoot">js/voorzieningen.js niet geladen — draai <code>uv run scripts/bouw_data.py</code>.</div>
+  </div>
+  <div class="chart-box reveal">
+    <h4>Voorzieningendichtheid vergeleken met heel Rotterdam
+      <span class="status niveau">wijk / gemeente</span></h4>
+    <div class="sub">Locaties per 1.000 inwoners per categorie, zelfde OSM-telling voor
+      wijk en gemeente.</div>
+    <div class="chart-wrap"><canvas id="chVoorz"></canvas></div>
+    <div class="foot" id="voorzVergelijkFoot"></div>
+  </div>
+</section>
+
+<!-- ============ SYNTHESE ============ -->
+<section id="s6" style="border-bottom:none">
+  <div class="hm" aria-hidden="true">A13<span>6,8</span></div>
+  <div class="eyebrow">09 · Duiding</div>
+  <h2>Duiding — interpretatie, geen data</h2>
+  <p>Alles hierboven zijn cijfers met bron en peiljaar. Dit blok is het enige met
+     interpretatie door de opsteller; lees het als hypothese, niet als meting.</p>
+  <div class="duiding reveal">
+    <h3>Interpretatie van de opsteller</h3>
+    <ul>
+      <li><b>Gezinswijk in groei.</b> Ruim 1 op 5 inwoners is jonger dan 15 en 39% van de
+        huishoudens heeft kinderen. School-, sport- en zorgverplaatsingen domineren dan
+        doorgaans; veilige fietsroutes en oversteekbaarheid wegen hier vermoedelijk zwaarder
+        dan spitsdoorstroming.</li>
+      <li><b>Autogeoriënteerd door ligging.</b> Bovengemiddeld inkomen, eengezinswoningen,
+        directe snelwegtoegang en 3,8 km tot het spoor maken de auto voor veel verplaatsingen
+        de voor de hand liggende keuze; metro E ligt alleen voor Park Zestienhoven op
+        loopafstand.</li>
+      <li><b>Differentieer per buurt, niet per wijk.</b> Zestienhoven en Kleinpolder verschillen
+        onderling sterker dan de wijk van de stad (inkomen 2,6×, autobezit 1,2 vs 0,7 per
+        huishouden). Wijkgemiddelde sturing mist beide staarten.</li>
+      <li><b>Leefbaarheid en mobiliteit zijn hier één dossier.</b> De A13 levert het gebied
+        bereikbaarheid én geluid- en luchtbelasting op aanliggende woningen; de 16
+        fietskruisingen en omrijfactor 1,42 hierboven kwantificeren de barrièrewerking.</li>
+    </ul>
+  </div>
+
+  <h3>Bronnen (open data, jaarlijks of vaker ververst)</h3>
+  <ul class="bronnen reveal">
+    <li>CBS StatLine via OData (script pakt automatisch de nieuwste jaargang): Kerncijfers
+      wijken en buurten (2025: 86165NED), Nabijheidsstatistieken (2025: 86270NED),
+      ODiN-mobiliteit (84710NED, jaarlijkse release, laagste niveau: provincie).</li>
+    <li>PDOK — CBS Wijken en Buurten (buurtgeometrie, 2025, CC0) en CBS
+      vierkantstatistieken 100 m (2024, CC BY 4.0).</li>
+    <li>ODiN-microdata 2022–2023 (CBS via DANS; jaarlijkse release) — alleen als geaggregeerde
+      uitkomsten met ≥10 waarnemingen per cel verwerkt; de microdata zelf maakt geen deel uit
+      van dit dashboard. Wijkafbakening via CBS PC4-geometrie (download.cbs.nl, jaarlijks).</li>
+    <li>GTFS Nederland via NDOV/OVapi (dienstregeling, dagelijks ververst; peildatum bij de tabel).</li>
+    <li>Kaartondergrond: CartoDB Positron (© OpenStreetMap-bijdragers © CARTO).</li>
+    <li>OpenStreetMap via OSMnx — netwerk en voorzieningen (© OpenStreetMap-bijdragers, ODbL;
+      doorlopend bijgewerkt, volledigheid niet gegarandeerd).</li>
+    <li>Overige kerncijfers (bevolking, inkomen, wonen): CBS KWB-doorleveringen en gemeente
+      Rotterdam BRP/wijkprofiel, peiljaren bij elke grafiek. Handmatig bijgehouden in
+      <code>js/data.js</code>.</li>
+  </ul>
+  <p class="foot" style="margin-top:14px">Opgesteld als verkennend gebiedsprofiel. Percentages zijn afgerond;
+     cijfers uit verschillende peiljaren zijn niet zonder meer optelbaar. Geen persoonsgegevens verwerkt (AVG-proof: alle data ≥ wijkniveau, CBS-onthullingsregels van toepassing).</p>
+</section>
+
+</main>
+
+<script defer src="js/data.js"></script>
+<script defer src="js/profiel.js"></script>
+<!-- gegenereerd door scripts/bouw_data.py (uv run scripts/bouw_data.py [--wijk WKxxxxxx]);
+     ontbreekt een bestand, dan degradeert het dashboard netjes -->
+<script defer src="js/geo.js"></script>
+<script defer src="js/odin_wijk.js"></script>
+<script defer src="js/ov.js"></script>
+<script defer src="js/infra.js"></script>
+<script defer src="js/voorzieningen.js"></script>
+<script defer src="js/cbs_mobiliteit.js"></script>
+<script defer src="js/ongevallen.js"></script>
+<script defer src="js/app.js"></script>
+</body>
+</html>

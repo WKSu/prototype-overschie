@@ -1,0 +1,2 @@
+/* Gegenereerd door scripts/bouw_data.py op 2026-08-10 — niet met de hand bewerken; draai het script opnieuw om te verversen. */
+const ODINW = {"bron":"ODiN microdata (CBS via DANS), eigen bewerking","niveau":"wijk","leeg":true,"reden":"geen postcodegebied ligt voor meer dan de helft binnen de grens","caveat":"Voor Rivium levert ODiN geen bruikbare uitkomst: geen postcodegebied ligt voor meer dan de helft binnen de grens. Dat is een uitkomst van de gebiedsafbakening, geen storing in de bron.","n":{"personen":0,"verplaatsingen":0},"drempel":{"nMin":20}};

@@ -22,6 +22,7 @@ const DATA_BESTANDEN = [
   ["infra", "infra.js"],
   ["voorzieningen", "voorzieningen.js"],
   ["cbs", "cbs_mobiliteit.js"],
+  ["segmenten", "segmenten.js"],
   ["ongevallen", "ongevallen.js"],
 ];
 

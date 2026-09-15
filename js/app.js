@@ -53,42 +53,317 @@ const GRIJS="#7A7A6C";
 const KLEUR_SOORT = {metro:"#B0452F", tram:GEEL, bus:SCHIE, trein:ASFALT, veer:POLDER, overig:GRIJS};
 const gridOpt = {color:"rgba(34,38,31,.10)"};
 
+/* ---------- referentiereeksen: met wie vergelijk je? (#48, #7) ----------
+   Elke grafiek vergeleek het gebied met de gemeente. Voor een wijk is dat de juiste
+   buitenstaander. Voor een rayon niet: Noord buiten de Ring is 163.560 van 672.950 inwoners,
+   bijna een kwart, dus het gemeentegemiddelde bevat het rayon zelf. Die vergelijking is
+   deels circulair en de verschillen zijn structureel klein.
+
+   De natuurlijke peer group van een rayon zijn de andere drie rayons: vergelijkbaar in
+   omvang en bestuurlijke functie, en precies de vergelijking die in een rayonplan gemaakt
+   wordt. Vandaar een standaardkeuze per niveau, en niet één vaste referentie.
+
+   Dit blok staat vóór de eerste grafiek en niet halverwege het bestand: de grafieken van
+   sectie 02 en 03 schrijven zich tijdens hun eigen blok in bij `bijRefWijziging()`, en stond
+   die functie lager, dan zat `refAbonnees` op dat moment nog in de temporal dead zone en zou
+   veilig() die blokken netjes laten vallen. Netjes gevallen blokken zijn nog steeds gevallen
+   blokken. */
+const REF = (typeof REFERENTIE !== "undefined" && REFERENTIE.gebieden) || {};
+/* De code van de gemeente, voor grafieken die Rotterdam al als vaste reeks tekenen. */
+const GEMEENTECODE = (typeof GEBIEDEN !== "undefined" && GEBIEDEN.gemeente
+  && GEBIEDEN.gemeente.code) || "";
+const REF_KLEUR = {gemeente: SCHIE, rayon: "#7B4B94", wijk: POLDER, gebied: POLDER};
+
+function referentiekandidaten() {
+  const eigen = GEBIEDCODE;
+  const alle = Object.entries(REF).map(([code, r]) => ({code, ...r}));
+  const rayons = alle.filter(r => r.niveau === "rayon" && r.code !== eigen);
+  const gemeente = alle.filter(r => r.niveau === "gemeente" && r.code !== eigen);
+  if (GEBIEDNIVEAU === "rayon") {
+    /* de zusterrayons standaard aan, de gemeente beschikbaar maar uit */
+    return [...rayons.map(r => ({...r, standaard: true})),
+            ...gemeente.map(r => ({...r, standaard: false}))];
+  }
+  if (GEBIEDNIVEAU === "gemeente") {
+    /* op gemeenteniveau zijn de vier rayons de interne verdeling, geen buitenstaander */
+    return rayons.map(r => ({...r, standaard: true}));
+  }
+  /* wijk of gebied: de gemeente is hier wél een zinnige buitenstaander, en het eigen rayon
+     is de directe context waarin dit gebied bestuurlijk valt */
+  const eigenRayon = (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [])
+    .find(r => (r.gebieden || []).some(g => g.code === eigen));
+  return [
+    ...gemeente.map(r => ({...r, standaard: true})),
+    ...rayons.filter(r => eigenRayon && r.code === eigenRayon.code)
+             .map(r => ({...r, standaard: true})),
+  ];
+}
+
+const REF_KANDIDATEN = referentiekandidaten();
+
+/* Peers op hetzelfde niveau: de eenheden waarmee dit gebied zich láát vergelijken.
+   Voor een rayon de andere rayons; voor een wijk of gebied de andere gebieden in hetzelfde
+   rayon — dezelfde bestuurlijke context en ongeveer dezelfde omvang, en dat is de vergelijking
+   die in een gebiedsplan gemaakt wordt. Tussen niveaus vergelijken doen we bewust niet: dan
+   presenteer je een omvangseffect als een verschil.
+
+   Eén plek, want zowel de zelfvoorzienendheid (#49) als het signaleringsoverzicht (#67) heeft
+   dezelfde groep nodig, en twee kopieën van deze regel gaan uit elkaar lopen. */
+function peersOpNiveau(heeft = () => true, binnenEigenRayon = true) {
+  const eigenRayon = (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [])
+    .find(r => (r.gebieden || []).some(g => g.code === GEBIEDCODE));
+  /* `binnenEigenRayon` beperkt de groep tot de zusters in hetzelfde rayon. Dat is nodig waar
+     de omvang van het gebied de uitkomst stuurt — zelfvoorzienendheid (#49) — maar niet bij
+     WOZ, inkomen of armoede. En het is niet gratis: een rayon van drie gebieden levert maar
+     twee peers, en met twee vergelijkingen is "de hoogste" een toevalligheid. Voor het
+     signaleringsoverzicht zijn daarom alle veertien gebieden de groep. */
+  const zusters = GEBIEDNIVEAU === "rayon" || GEBIEDNIVEAU === "gemeente" || !binnenEigenRayon
+    ? null
+    : new Set((eigenRayon ? eigenRayon.gebieden : []).map(g => g.code));
+  const peers = Object.entries(REF)
+    .filter(([code, r]) => code !== GEBIEDCODE && r.niveau === GEBIEDNIVEAU
+                        && heeft(r) && (!zusters || zusters.has(code)))
+    .map(([code, r]) => ({code, ...r}));
+  return {
+    peers,
+    /* Hoe je die groep noemt in een zin. Bij een wijk is "de andere rayons" onjuist. */
+    groepNaam: zusters && eigenRayon
+      ? `andere gebieden in ${eigenRayon.naam}`
+      : GEBIEDNIVEAU === "wijk" ? "andere Rotterdamse gebieden" : `andere ${GEBIEDNIVEAU}s`,
+    /* Hoeveel peers zíjn er, los van hoeveel er gebouwd zijn. Zonder dat onderscheid meldt
+       het dashboard "bouw de overige gebieden" bij een gemeente die per definitie geen peer
+       heeft, en dat is een aanwijzing die nergens toe leidt. */
+    mogelijk: GEBIEDNIVEAU === "gemeente" ? 0
+      : GEBIEDNIVEAU === "rayon" ? Math.max(0, (GEBIEDEN?.rayons || []).length - 1)
+      : zusters ? Math.max(0, zusters.size - 1)
+      : Math.max(0, (GEBIEDEN?.rayons || []).reduce((n, r) => n + (r.gebieden || []).length, 0) - 1),
+  };
+}
+const refAan = new Set(REF_KANDIDATEN.filter(r => r.standaard).map(r => r.code));
+
+/* ---------- de referentiekeuze als pagina-brede instelling (#7) ----------
+   De keuze stond in sectie 02 en gold voor één grafiek: de buurtvergelijking. Dat is de
+   verkeerde plek voor iets wat het hele dashboard aangaat. Wie in sectie 07 leest hoe
+   bewoners reizen wil daar kunnen zien hoe dat zich verhoudt tot het rayon, en niet vijf
+   secties terugscrollen naar een keuzevakje dat op die grafiek geen effect had.
+
+   Eén toestand (`refAan`), meerdere bedieningen: elk element met `data-refkeuze` krijgt
+   dezelfde keuzevakjes, een wijziging waar dan ook werkt de andere bij en laat elke
+   ingeschreven grafiek zichzelf opnieuw tekenen. Een grafiek die zich niet inschrijft
+   verandert niet — dat is zichtbaar, en beter dan een pagina die half bijgewerkt is.
+
+   Waarom niet één referentie per grafiek: dan vergelijkt sectie 03 met de gemeente en
+   sectie 07 met het rayon, en is het verschil tussen twee grafieken niet meer te lezen als
+   een verschil in de data. Consistentie over de secties heen is hier de hele opgave. */
+const refAbonnees = [];
+function bijRefWijziging(naam, fn) { refAbonnees.push([naam, fn]); }
+function refGewijzigd() {
+  /* Eén grafiek die struikelt mag de andere niet meenemen. Dat is precies wat veilig() doet,
+     dus dat gebruiken we ook: een hertekenfout komt zo op body[data-veilig-fouten] terecht en
+     valt op in de rooktest. Alleen in de console loggen zou een grafiek zonder referentielijn
+     er net zo uit laten zien als een grafiek die er geen heeft. */
+  refAbonnees.forEach(([naam, fn]) => veilig("referentie:" + naam, fn));
+}
+function refActief() { return REF_KANDIDATEN.filter(r => refAan.has(r.code)); }
+
+/* Kleur per niveau — maar op rayonniveau staan er drie zusterrayons naast elkaar, en die
+   kregen alle drie dezelfde paarse lijn. Drie ononderscheidbare lijnen met drie namen in de
+   legenda is geen vergelijking.
+
+   Daarom de tint van het niveau vasthouden en binnen dat niveau de lichtheid variëren: paars
+   blijft "rayon", maar de drie rayons zijn uit elkaar te houden. Een andere hue per rayon zou
+   dat verband juist weggooien. De volgorde komt uit REF_KANDIDATEN en is dus stabiel: hetzelfde
+   rayon houdt dezelfde tint over alle grafieken heen, en dat is waar #7 om draait.
+
+   De lichtheid wordt begrensd: te licht verdwijnt tegen de achtergrond, te donker wordt zwart. */
+function _hexNaarHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  if (max === min) return [0, 0, l * 100];
+  const d = max - min;
+  const sat = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  const h = max === r ? ((g - b) / d + (g < b ? 6 : 0))
+    : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, sat * 100, l * 100];
+}
+function _hslNaarHex(h, sp, lp) {
+  const sat = sp / 100, l = lp / 100;
+  const c = (1 - Math.abs(2 * l - 1)) * sat, x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+    : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  const naar = v => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return "#" + naar(r) + naar(g) + naar(b);
+}
+/* Verschuiving per positie binnen het niveau. De eerste houdt de basiskleur, zodat een
+   grafiek met één referentie er precies zo uitziet als voorheen. */
+const _L_VERSCHUIVING = [0, 18, -13, 32, -22];
+function refKleurVan(r) {
+  const basis = REF_KLEUR[r.niveau] || GRIJS;
+  const zelfde = REF_KANDIDATEN.filter(k => k.niveau === r.niveau);
+  if (zelfde.length < 2) return basis;
+  const i = zelfde.findIndex(k => k.code === r.code);
+  const [h, sat, l] = _hexNaarHsl(basis);
+  const verschoven = l + (_L_VERSCHUIVING[i % _L_VERSCHUIVING.length] || 0);
+  return _hslNaarHex(h, sat, Math.min(68, Math.max(22, verschoven)));
+}
+
+/* Streeppatroon per positie binnen het niveau. Kleur alleen is niet genoeg — vier lijnen in
+   vier tinten van dezelfde paars zijn voor een kleurenblinde lezer vier keer grijs — dus de
+   lijnen krijgen er een vorm bij. Dezelfde volgorde als de tinten. */
+const _STREEP = [[5, 4], [2, 3], [9, 4], [1, 3], [12, 3, 3, 3]];
+function refStreepVan(r) {
+  const zelfde = REF_KANDIDATEN.filter(k => k.niveau === r.niveau);
+  const i = Math.max(0, zelfde.findIndex(k => k.code === r.code));
+  return _STREEP[i % _STREEP.length];
+}
+
+/* Waarde diep uit een referentierij: "verdelingen.leeftijd", "odin.motieven". */
+function refPad(rij, pad) {
+  return pad.split(".").reduce((o, k) => (o == null ? o : o[k]), rij);
+}
+
+/* Referentiereeksen, uitgelijnd op de labels van de grafiek zelf.
+
+   Uitlijnen op label en niet op positie. Een referentiegebied kan een categorie missen — te
+   weinig ODiN-waarnemingen, of een CBS-klasse die daar niet voorkomt — en bij uitlijnen op
+   positie schuift de rest van de reeks dan één plek op zonder dat iemand het ziet.
+
+   Drie vormen komen binnen: {labels, values} voor een verdeling, {jaren, waarden} voor een
+   tijdreeks, en [{label, share, n}] uit ODiN. Die laatste draagt `n` mee, en daar geldt de
+   drempel van #13 ook: een peer-aandeel dat op negen verplaatsingen rust hoort niet in beeld,
+   ook niet als vergelijking. */
+function refReeksen(pad, labels, opties = {}) {
+  const drempel = (typeof ODINW !== "undefined" && ODINW.drempel && ODINW.drempel.nMin) || 20;
+  /* `zonder` laat een grafiek een referentiegebied overslaan dat hij al als vaste reeks
+     tekent. De ODiN-grafieken hebben Rotterdam altijd al staan, uit dezelfde uitdraai; die
+     er nog een keer naast zetten leverde twee identieke balken met dezelfde naam. */
+  const zonder = opties.zonder || [];
+  return refActief().filter(r => !zonder.includes(r.code)).map(r => {
+    const bron = refPad(REF[r.code] || {}, pad);
+    let bij = null;
+    let onderDrempel = 0;
+    /* Zelfde markering als bij de buurtvergelijking (#37): een aggregaat met onderdrukte
+       deelgebieden is een ondergrens, en dat hoort in het label te staan waar de lezer de
+       lijn ziet — niet alleen in een voetnoot drie grafieken verderop. */
+    const onvolledig = bron && bron.volledig === false;
+    if (Array.isArray(bron)) {
+      bij = {};
+      bron.forEach(x => {
+        if (x.onderdrukt) return;                       // verantwoordingsregel, geen categorie
+        if (typeof x.n === "number" && x.n < drempel) { onderDrempel++; return; }
+        bij[x.label] = x.share;
+      });
+    } else if (bron && Array.isArray(bron.labels) && Array.isArray(bron.values)) {
+      bij = Object.fromEntries(bron.labels.map((l, i) => [l, bron.values[i]]));
+    } else if (bron && Array.isArray(bron.jaren) && Array.isArray(bron.waarden)) {
+      /* Een tijdreeks noemt zijn as `jaren`/`waarden` en niet `labels`/`values`. Zonder deze
+         tak gaf refReeksen() stilletjes niets terug: de legenda stond er, de lijnen niet. */
+      bij = Object.fromEntries(bron.jaren.map((j, i) => [j, bron.waarden[i]]));
+    }
+    if (!bij) return null;
+    const waarden = labels.map(l => (typeof bij[l] === "number" ? bij[l] : null));
+    /* Niets bruikbaars is geen reeks. Een lijn van louter gaten leest als "nul". */
+    if (!waarden.some(v => v !== null)) return null;
+    return {code: r.code, naam: r.naam, niveau: r.niveau, kleur: refKleurVan(r),
+            streep: refStreepVan(r),
+            label: r.naam + (onvolledig ? ` (≥, ${bron.nOnderdrukt || 0} onderdrukt)` : ""),
+            waarden, onderDrempel};
+  }).filter(Boolean);
+}
+
+/* Eén getal per referentiegebied: "inkomen.ontvanger", "indicatoren.woz.waarde".
+
+   Het getal mag kaal zijn of verpakt als {waarde, volledig, nOnderdrukt}. Dat tweede is het
+   geval waar het om gaat: het gemeentelijke inkomen rust op 14 van de 21 wijken en is dus een
+   ondergrens, en dat hoort in het label te staan (#37). */
+function refWaarden(pad) {
+  return refActief().map(r => {
+    const v = refPad(REF[r.code] || {}, pad);
+    const waarde = typeof v === "number" ? v
+      : (v && typeof v.waarde === "number" ? v.waarde : null);
+    if (waarde === null) return null;
+    const onvolledig = v && v.volledig === false;
+    return {code: r.code, naam: r.naam, niveau: r.niveau, kleur: refKleurVan(r), waarde,
+            label: r.naam + (onvolledig ? ` (≥, ${v.nOnderdrukt || 0} onderdrukt)` : "")};
+  }).filter(Boolean);
+}
+
+/* Chart.js-balkdatasets naast de eigen reeks. Dunner dan de eigen balk: het gebied blijft het
+   onderwerp en de referentie staat ernaast, niet ervoor. */
+function refDatasets(pad, labels, opties = {}) {
+  return refReeksen(pad, labels, opties).map(r => ({
+    label: r.label, data: r.waarden, backgroundColor: r.kleur, borderColor: ASFALT,
+    borderWidth: 1, maxBarThickness: opties.maxBarThickness || 14,
+  }));
+}
+
+/* Eén stijl voor een referentielijn, gedeeld door de tijdreeks en de bevolkingsgroei: dun,
+   gestreept, in de kleur van het niveau. `data` gaat apart mee omdat de groeigrafiek zijn
+   reeks eerst indexeert, en de tijdreeks per jaargang een open stip zet. */
+function refLijn(ref, data, extra = {}) {
+  return {label: ref.label, data, borderColor: ref.kleur, backgroundColor: ref.kleur,
+          borderWidth: 2, borderDash: ref.streep || [5, 4], pointRadius: 2.5,
+          pointBorderColor: ref.kleur, pointBackgroundColor: ref.kleur, tension: 0,
+          spanGaps: false, fill: false, ...extra};
+}
+
+/* Hoeveel referentiecategorieën onder de ODiN-drempel zijn weggelaten; leeg als er niets weg
+   is. Hoort in de voetnoot van de grafiek, niet in de console. */
+function refDrempelTekst(pad, labels, opties = {}) {
+  const weg = refReeksen(pad, labels, opties).filter(r => r.onderDrempel);
+  return weg.length
+    ? " Bij " + weg.map(r => `${r.naam} (${r.onderDrempel})`).join(", ") +
+      " zijn categorieën met te weinig waarnemingen uit de referentie gelaten."
+    : "";
+}
+
+/* De bediening. Twee vormen: met uitleg (in sectie 02, waar de keuze wordt geïntroduceerd)
+   en compact (in de balk bovenaan, die op elke sectie meescrollt). */
+function bouwRefKeuze(el) {
+  if (!REF_KANDIDATEN.length) { el.remove(); return; }
+  const compact = el.hasAttribute("data-refcompact");
+  const uitleg = GEBIEDNIVEAU === "rayon"
+    ? "Vergelijk met de andere rayons — vergelijkbaar in omvang en functie. De gemeente " +
+      "bevat dit rayon zelf voor ruwweg een kwart, dus die vergelijking zegt minder."
+    : GEBIEDNIVEAU === "gemeente"
+      ? "De vier rayons als interne verdeling van de gemeente."
+      : "Vergelijk met de gemeente en met het rayon waar dit gebied onder valt.";
+  el.innerHTML =
+    (compact
+      ? '<label style="margin-right:2px">Vergelijk met</label>'
+      : `<span style="color:var(--asfalt-zacht)">${uitleg} Geldt voor alle grafieken op ` +
+        "deze pagina.</span><br>") +
+    REF_KANDIDATEN.map(r =>
+      '<label style="cursor:pointer;margin-right:12px;white-space:nowrap">' +
+      `<input type="checkbox" data-ref="${r.code}"${refAan.has(r.code) ? " checked" : ""}> ` +
+      /* In de donkere balk is de reekskleur zelf niet leesbaar als tekstkleur — SCHIE op
+         asfalt haalt geen enkel contrastminimum. Daar wordt het een stip naast lichte tekst;
+         in de sectie, op lichte achtergrond, blijft de naam zelf gekleurd. */
+      (compact
+        ? `<span class="stip" style="background:${refKleurVan(r)}"></span>${r.naam}`
+        : `<span style="color:${refKleurVan(r)}">${r.naam}</span>`) +
+      "</label>").join("");
+  el.querySelectorAll("input[data-ref]").forEach(cb => {
+    cb.addEventListener("change", () => {
+      if (cb.checked) refAan.add(cb.dataset.ref); else refAan.delete(cb.dataset.ref);
+      /* De andere bedieningen tonen dezelfde toestand; anders staat de balk bovenaan iets
+         anders aan dan het blok in sectie 02 en is niet meer te zien wat er getekend is. */
+      document.querySelectorAll(`input[data-ref="${cb.dataset.ref}"]`)
+        .forEach(a => { a.checked = cb.checked; });
+      refGewijzigd();
+    });
+  });
+}
+
+
 /* gedeelde kaartondergrond: CartoDB Positron (licht, laat dataoverlays spreken) */
 function basiskaart(){
   return L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
     {maxZoom:19, subdomains:"abcd",
      attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-bijdragers © <a href="https://carto.com/attributions">CARTO</a>'});
 }
-/* ---------- #30: toetsen aan een norm ----------
-   Kleuren op basis van een norm is interpretatie, en dit dashboard houdt interpretatie in het
-   duidingsblok. Na overleg met de opdrachtgever geldt daarom: alleen een wettelijke of
-   vastgestelde norm, nooit het gemeentegemiddelde — bij elke indicator ligt de helft van de
-   gebieden daaronder, en dan kleurt de helft rood zonder dat er een opgave is.
-
-   Daarom staat dit alleen bij luchtkwaliteit: dat is de enige indicator in dit dashboard met
-   een harde grenswaarde. Op WOZ, inkomen en armoede komt geen norm; de registry legt uit
-   waarom. Geluid volgt met #19.
-
-   Geen kleur alleen: bij de markering staat altijd de norm, het soort en het peiljaar in
-   tekst. Rood/groen zonder woorden sluit kleurenblinde lezers uit, en een kleur zonder norm
-   is een oordeel zonder onderbouwing. */
-function normtoets(sleutel, waarde) {
-  const normen = (typeof GEBIEDEN !== "undefined" && GEBIEDEN.normen) || {};
-  const lijst = normen[sleutel];
-  if (!lijst || !lijst.length || typeof waarde !== "number" || !isFinite(waarde)) return "";
-  const regels = lijst.map(n => {
-    const over = n.richting === "boven" ? waarde > n.waarde : waarde < n.waarde;
-    /* Woorden vóór de kleur, en het teken erbij: "boven" en "onder" staan er letterlijk. */
-    const kleur = over ? "var(--rood)" : "var(--polder)";
-    const teken = over ? "boven" : "onder";
-    const soort = n.soort === "wettelijk" ? "wettelijke grenswaarde" : "advieswaarde";
-    return `<span style="color:${kleur};font-weight:700">${over ? "▲" : "▼"} ${teken}</span>` +
-      ` de ${soort} van ${n.waarde.toLocaleString("nl-NL")} ${n.eenheid}` +
-      `<span style="color:#7a7a6c"> (${n.naam}, ${n.bron}, ${n.peiljaar})</span>`;
-  });
-  return "<br>" + regels.join("<br>");
-}
-
 function pctTip(unit){ return {callbacks:{label:c=>` ${c.parsed.y ?? c.parsed.x ?? c.parsed}${unit}`}}; }
 
 /* gedeeld over blokken heen */
@@ -170,6 +445,9 @@ balk.innerHTML =
   '<label for="gebiedKeuze">Gebied</label>' +
   '<select id="gebiedKeuze"></select>' +
   `<span class="niveaubadge">${GEBIEDNIVEAU}</span>` +
+  /* De referentiekeuze hoort bij elke sectie, dus in de balk die meescrollt (#7). Leeg als
+     er geen referentiegebieden zijn; bouwRefKeuze() haalt hem dan weg. */
+  '<span class="refkeuze" data-refkeuze data-refcompact></span>' +
   (totaal > 1 ? "" : '<span class="hint">alleen dit gebied is gebouwd — ' +
     "<code>uv run scripts/bouw_data.py --alle-gebieden</code></span>");
 document.body.insertBefore(balk, document.body.firstChild);
@@ -608,40 +886,121 @@ document.querySelectorAll(".hm").forEach(el => {
 
 veilig("grafiek-groei", () => {
 /* groei: lijn met alleen echte peilpunten */
-new Chart(chGroei, {type:"line", data:{labels:D.groei.labels, datasets:[{
-    data:D.groei.values, borderColor:ASFALT, backgroundColor:GEEL,
-    pointRadius:6, pointBorderColor:ASFALT, pointBorderWidth:2, borderWidth:2.5,
-    borderDash:[6,5], tension:0
-  }]},
-  options:{maintainAspectRatio:false, plugins:{legend:{display:false},
-    tooltip:{callbacks:{label:c=>` ${c.parsed.y.toLocaleString("nl-NL")} inwoners`}}},
+/* Vergelijken kan hier niet in absolute aantallen: de gemeente telt 673.000 inwoners en een
+   gebied 20.000, dus naast elkaar op één as wordt de gebiedslijn een streep onderaan. Zodra
+   er een referentie aan staat schakelt de grafiek daarom naar een index — eerste peiljaar =
+   100 — en dan gaat het over het enige dat vergelijkbaar is: het tempo. De as-titel en de
+   tooltip zeggen welke van de twee je ziet; een index die eruitziet als een aantal is erger
+   dan geen vergelijking. */
+const jaar0 = D.groei.values.findIndex(v => typeof v === "number" && v > 0);
+/* Indexeren op hetzelfde basisjaar als de eigen reeks, niet op het eigen eerste peiljaar:
+   twee lijnen met een verschillend basisjaar zijn niet vergelijkbaar, ook al ziet het er
+   vergelijkbaar uit. Heeft een referentiegebied dat jaar niet, dan valt de reeks weg — dat
+   is zichtbaar, en beter dan een lijn op een andere schaal. */
+const indexeer = reeks => {
+  const basis = reeks[jaar0];
+  if (typeof basis !== "number" || !basis) return reeks.map(() => null);
+  return reeks.map(v => typeof v === "number" ? Math.round(1000 * v / basis) / 10 : null);
+};
+const eigen = {label:GEBIEDLABEL, data:D.groei.values, borderColor:ASFALT, backgroundColor:GEEL,
+  pointRadius:6, pointBorderColor:ASFALT, pointBorderWidth:2, borderWidth:2.5,
+  borderDash:[6,5], tension:0};
+let geindexeerd = false;
+const g = new Chart(chGroei, {type:"line",
+  data:{labels:D.groei.labels, datasets:[eigen]},
+  options:{maintainAspectRatio:false,
+    plugins:{legend:{display:false, position:"bottom"},
+    tooltip:{callbacks:{label:c=> geindexeerd
+      ? ` ${c.dataset.label}: ${c.parsed.y.toLocaleString("nl-NL")} (${D.groei.labels[jaar0]} = 100)`
+      : ` ${c.dataset.label}: ${c.parsed.y.toLocaleString("nl-NL")} inwoners`}}},
     scales:{y:{grid:gridOpt, ticks:{callback:v=>v.toLocaleString("nl-NL")}, suggestedMin:15000},
             x:{grid:{display:false}}}}});
+bijRefWijziging("groei", () => {
+  const ref = refReeksen("groei", D.groei.labels);
+  geindexeerd = ref.length > 0 && jaar0 >= 0;
+  g.data.datasets = [
+    {...eigen, data: geindexeerd ? indexeer(D.groei.values) : D.groei.values},
+    ...ref.map(r => refLijn(r, indexeer(r.waarden))),
+  ];
+  g.options.plugins.legend.display = geindexeerd;
+  g.options.scales.y.suggestedMin = geindexeerd ? 95 : 15000;
+  g.options.scales.y.title = geindexeerd
+    ? {display:true, text:`index, ${D.groei.labels[jaar0]} = 100`}
+    : {display:true, text:"inwoners"};
+  g.update();
+});
 });
 
 veilig("grafiek-leeftijd", () => {
 /* leeftijd: horizontale balken */
-new Chart(chLeeftijd, {type:"bar", data:{labels:D.leeftijd.labels, datasets:[{
-    data:D.leeftijd.values,
-    backgroundColor:[POLDER,BETON,SCHIE,BETON,GEEL], borderColor:ASFALT, borderWidth:1
-  }]},
+/* Eén kleur voor de eigen reeks, en dat is GEEL zoals overal elders in het dashboard waar
+   een gebied naast een referentie staat. De vijf wisselende klassekleuren waren decoratief —
+   ze betekenden niets — maar zodra er een referentie naast staat betekenen ze wél iets
+   verkeerds: één ervan was SCHIE, precies de kleur van de gemeentereferentie. Twee
+   verschillende dingen in dezelfde kleur in dezelfde grafiek. */
+const eigen = {label:GEBIEDLABEL, data:D.leeftijd.values,
+  backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1};
+const g = new Chart(chLeeftijd, {type:"bar",
+  data:{labels:D.leeftijd.labels, datasets:[eigen]},
   options:{indexAxis:"y", maintainAspectRatio:false,
-    plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>` ${c.parsed.x}%`}}},
+    plugins:{legend:{display:false, position:"bottom"},
+      tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${c.parsed.x}%`}}},
     scales:{x:{grid:gridOpt, max:32, ticks:{callback:v=>v+"%"}}, y:{grid:{display:false}}}}});
+/* De vaste bovengrens van 32% was op Overschie geijkt. Zodra er een referentiegebied naast
+   staat kan die overschreden worden, en een balk die tegen de rand aan stopt liegt over zijn
+   lengte. Daarom rekt de as mee met wat er werkelijk getekend wordt. */
+bijRefWijziging("leeftijd", () => {
+  const ref = refDatasets("verdelingen.leeftijd", D.leeftijd.labels, {maxBarThickness:11});
+  g.data.datasets = [eigen, ...ref];
+  g.options.plugins.legend.display = ref.length > 0;
+  const hoogste = Math.max(...[eigen, ...ref]
+    .flatMap(d => d.data.filter(v => typeof v === "number")));
+  g.options.scales.x.max = Math.max(32, Math.ceil(hoogste / 5) * 5);
+  g.update();
+});
 });
 
 veilig("grafiek-huishoudens", () => {
-/* huishoudens: doughnut */
-new Chart(chHuish, {type:"doughnut", data:{labels:D.huishoudens.labels, datasets:[{
-    data:D.huishoudens.values, backgroundColor:[SCHIE,BETON,GEEL],
-    borderColor:"#FAFAF5", borderWidth:3
-  }]},
-  options:{maintainAspectRatio:false, cutout:"55%",
-    plugins:{legend:{position:"bottom"}, tooltip:{callbacks:{label:c=>` ${c.label}: ${c.parsed}%`}}}}});
+/* huishoudens: gestapelde balk per gebied.
+
+   Dit was een donut. Een donut kan geen tweede gebied tonen: extra ringen eromheen waren
+   onleesbaar — drie concentrische ringen zonder eigen label, en de lezer kan niet zien welke
+   ring welk gebied is. Ringen dunner maken of vervagen maakt dat erger, niet beter.
+
+   Een gestapelde balk per gebied lost precies dat op: de drie categorieën houden hun kleur,
+   het gebied staat als aslabel, en de segmenten beginnen op dezelfde lijn zodat "meer
+   eenpersoons dan Rotterdam" af te lezen is in plaats van af te leiden uit twee hoeken. De
+   eigen balk staat bovenaan.
+
+   Dat de kleuren hier categorieën coderen en niet gebieden is geen uitzondering op de
+   afspraak elders: het gebied is hier de as, niet de reeks. */
+const KLEUR_HH = [SCHIE, BETON, GEEL];
+const g = new Chart(chHuish, {type:"bar",
+  data:{labels:[GEBIEDNAAM], datasets:D.huishoudens.labels.map((l, i) => ({
+    label:l, data:[D.huishoudens.values[i]], backgroundColor:KLEUR_HH[i],
+    borderColor:ASFALT, borderWidth:1, maxBarThickness:46}))},
+  options:{indexAxis:"y", maintainAspectRatio:false,
+    plugins:{legend:{position:"bottom"},
+      tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${c.parsed.x}%`}}},
+    scales:{x:{stacked:true, grid:gridOpt, max:100, ticks:{callback:v=>v+"%"}},
+            y:{stacked:true, grid:{display:false}}}}});
+bijRefWijziging("huishoudens", () => {
+  const ref = refReeksen("verdelingen.huishoudens", D.huishoudens.labels);
+  g.data.labels = [GEBIEDNAAM, ...ref.map(r => r.label)];
+  g.data.datasets = D.huishoudens.labels.map((l, i) => ({
+    label:l,
+    data:[D.huishoudens.values[i], ...ref.map(r => r.waarden[i])],
+    backgroundColor:KLEUR_HH[i], borderColor:ASFALT, borderWidth:1, maxBarThickness:46,
+  }));
+  g.update();
+});
 });
 
 veilig("grafiek-inkomen", () => {
 /* inkomen: toggle per maat */
+/* Inkomen is één getal per gebied, geen verdeling: de referentie komt er dus als extra balk
+   naast in plaats van als tweede reeks. De bestaande "Nederland"-balk blijft staan — dat is
+   de landelijke ijking die CBS zelf meelevert, en die staat los van de gebiedsvergelijking. */
 let chInkomenObj = new Chart(chInkomen, {type:"bar",
   data:{labels:D.inkomen.ontvanger.labels, datasets:[{
     data:D.inkomen.ontvanger.values, backgroundColor:[GEEL,BETON], borderColor:ASFALT, borderWidth:1, maxBarThickness:110
@@ -649,23 +1008,46 @@ let chInkomenObj = new Chart(chInkomen, {type:"bar",
   options:{maintainAspectRatio:false, plugins:{legend:{display:false},
     tooltip:{callbacks:{label:c=>` € ${(c.parsed.y*1000).toLocaleString("nl-NL")}`}}},
     scales:{y:{grid:gridOpt, title:{display:true,text:"× € 1.000"}}, x:{grid:{display:false}}}}});
+function toonInkomen(maat) {
+  const d = D.inkomen[maat];
+  const ref = refWaarden(`inkomen.${maat}`);
+  chInkomenObj.data.labels = [...d.labels, ...ref.map(r => r.label)];
+  chInkomenObj.data.datasets[0].data = [...d.values, ...ref.map(r => r.waarde)];
+  chInkomenObj.data.datasets[0].backgroundColor = [GEEL, BETON, ...ref.map(r => r.kleur)];
+  chInkomenObj.update();
+}
 document.querySelectorAll("[data-ink]").forEach(btn=>btn.addEventListener("click",()=>{
   document.querySelectorAll("[data-ink]").forEach(b=>b.classList.remove("actief"));
   btn.classList.add("actief");
-  const d = D.inkomen[btn.dataset.ink];
-  chInkomenObj.data.datasets[0].data = d.values;
-  chInkomenObj.update();
+  toonInkomen(btn.dataset.ink);
 }));
+bijRefWijziging("inkomen", () => {
+  const actief = document.querySelector("[data-ink].actief");
+  toonInkomen(actief ? actief.dataset.ink : "ontvanger");
+});
 });
 
 veilig("grafiek-opleiding", () => {
 /* opleiding */
-new Chart(chOpleiding, {type:"bar", data:{labels:D.opleiding.labels, datasets:[{
-    data:D.opleiding.values, backgroundColor:[BETON,SCHIE,POLDER], borderColor:ASFALT, borderWidth:1, maxBarThickness:110
-  }]},
-  options:{maintainAspectRatio:false, plugins:{legend:{display:false},
-    tooltip:{callbacks:{label:c=>` ${c.parsed.y}%`}}},
+/* Eén kleur, om dezelfde reden als bij de leeftijdsopbouw: BETON/SCHIE/POLDER was decoratief
+   en SCHIE botst met de gemeentereferentie. */
+const eigen = {label:GEBIEDLABEL, data:D.opleiding.values,
+  backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:110};
+const g = new Chart(chOpleiding, {type:"bar",
+  data:{labels:D.opleiding.labels, datasets:[eigen]},
+  options:{maintainAspectRatio:false,
+    plugins:{legend:{display:false, position:"bottom"},
+      tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${c.parsed.y}%`}}},
     scales:{y:{grid:gridOpt, max:40, ticks:{callback:v=>v+"%"}}, x:{grid:{display:false}}}}});
+bijRefWijziging("opleiding", () => {
+  const ref = refDatasets("verdelingen.opleiding", D.opleiding.labels, {maxBarThickness:36});
+  g.data.datasets = [eigen, ...ref];
+  g.options.plugins.legend.display = ref.length > 0;
+  const hoogste = Math.max(...[eigen, ...ref]
+    .flatMap(d => d.data.filter(v => typeof v === "number")));
+  g.options.scales.y.max = Math.max(40, Math.ceil(hoogste / 5) * 5);
+  g.update();
+});
 });
 
 /* ---------- hoe is dit cijfer samengesteld, en is het volledig? (#37) ----------
@@ -747,85 +1129,6 @@ function zetAggregatie(canvasId, meta) {
     foot.appendChild(el);
   }
 }
-
-/* ---------- referentiereeksen: met wie vergelijk je? (#48, #7) ----------
-   Elke grafiek vergeleek het gebied met de gemeente. Voor een wijk is dat de juiste
-   buitenstaander. Voor een rayon niet: Noord buiten de Ring is 163.560 van 672.950 inwoners,
-   bijna een kwart, dus het gemeentegemiddelde bevat het rayon zelf. Die vergelijking is
-   deels circulair en de verschillen zijn structureel klein.
-
-   De natuurlijke peer group van een rayon zijn de andere drie rayons: vergelijkbaar in
-   omvang en bestuurlijke functie, en precies de vergelijking die in een rayonplan gemaakt
-   wordt. Vandaar een standaardkeuze per niveau, en niet één vaste referentie. */
-const REF = (typeof REFERENTIE !== "undefined" && REFERENTIE.gebieden) || {};
-const REF_KLEUR = {gemeente: SCHIE, rayon: "#7B4B94", wijk: POLDER, gebied: POLDER};
-
-function referentiekandidaten() {
-  const eigen = GEBIEDCODE;
-  const alle = Object.entries(REF).map(([code, r]) => ({code, ...r}));
-  const rayons = alle.filter(r => r.niveau === "rayon" && r.code !== eigen);
-  const gemeente = alle.filter(r => r.niveau === "gemeente" && r.code !== eigen);
-  if (GEBIEDNIVEAU === "rayon") {
-    /* de zusterrayons standaard aan, de gemeente beschikbaar maar uit */
-    return [...rayons.map(r => ({...r, standaard: true})),
-            ...gemeente.map(r => ({...r, standaard: false}))];
-  }
-  if (GEBIEDNIVEAU === "gemeente") {
-    /* op gemeenteniveau zijn de vier rayons de interne verdeling, geen buitenstaander */
-    return rayons.map(r => ({...r, standaard: true}));
-  }
-  /* wijk of gebied: de gemeente is hier wél een zinnige buitenstaander, en het eigen rayon
-     is de directe context waarin dit gebied bestuurlijk valt */
-  const eigenRayon = (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [])
-    .find(r => (r.gebieden || []).some(g => g.code === eigen));
-  return [
-    ...gemeente.map(r => ({...r, standaard: true})),
-    ...rayons.filter(r => eigenRayon && r.code === eigenRayon.code)
-             .map(r => ({...r, standaard: true})),
-  ];
-}
-
-const REF_KANDIDATEN = referentiekandidaten();
-
-/* Peers op hetzelfde niveau: de eenheden waarmee dit gebied zich láát vergelijken.
-   Voor een rayon de andere rayons; voor een wijk of gebied de andere gebieden in hetzelfde
-   rayon — dezelfde bestuurlijke context en ongeveer dezelfde omvang, en dat is de vergelijking
-   die in een gebiedsplan gemaakt wordt. Tussen niveaus vergelijken doen we bewust niet: dan
-   presenteer je een omvangseffect als een verschil.
-
-   Eén plek, want zowel de zelfvoorzienendheid (#49) als het signaleringsoverzicht (#67) heeft
-   dezelfde groep nodig, en twee kopieën van deze regel gaan uit elkaar lopen. */
-function peersOpNiveau(heeft = () => true, binnenEigenRayon = true) {
-  const eigenRayon = (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [])
-    .find(r => (r.gebieden || []).some(g => g.code === GEBIEDCODE));
-  /* `binnenEigenRayon` beperkt de groep tot de zusters in hetzelfde rayon. Dat is nodig waar
-     de omvang van het gebied de uitkomst stuurt — zelfvoorzienendheid (#49) — maar niet bij
-     WOZ, inkomen of armoede. En het is niet gratis: een rayon van drie gebieden levert maar
-     twee peers, en met twee vergelijkingen is "de hoogste" een toevalligheid. Voor het
-     signaleringsoverzicht zijn daarom alle veertien gebieden de groep. */
-  const zusters = GEBIEDNIVEAU === "rayon" || GEBIEDNIVEAU === "gemeente" || !binnenEigenRayon
-    ? null
-    : new Set((eigenRayon ? eigenRayon.gebieden : []).map(g => g.code));
-  const peers = Object.entries(REF)
-    .filter(([code, r]) => code !== GEBIEDCODE && r.niveau === GEBIEDNIVEAU
-                        && heeft(r) && (!zusters || zusters.has(code)))
-    .map(([code, r]) => ({code, ...r}));
-  return {
-    peers,
-    /* Hoe je die groep noemt in een zin. Bij een wijk is "de andere rayons" onjuist. */
-    groepNaam: zusters && eigenRayon
-      ? `andere gebieden in ${eigenRayon.naam}`
-      : GEBIEDNIVEAU === "wijk" ? "andere Rotterdamse gebieden" : `andere ${GEBIEDNIVEAU}s`,
-    /* Hoeveel peers zíjn er, los van hoeveel er gebouwd zijn. Zonder dat onderscheid meldt
-       het dashboard "bouw de overige gebieden" bij een gemeente die per definitie geen peer
-       heeft, en dat is een aanwijzing die nergens toe leidt. */
-    mogelijk: GEBIEDNIVEAU === "gemeente" ? 0
-      : GEBIEDNIVEAU === "rayon" ? Math.max(0, (GEBIEDEN?.rayons || []).length - 1)
-      : zusters ? Math.max(0, zusters.size - 1)
-      : Math.max(0, (GEBIEDEN?.rayons || []).reduce((n, r) => n + (r.gebieden || []).length, 0) - 1),
-  };
-}
-const refAan = new Set(REF_KANDIDATEN.filter(r => r.standaard).map(r => r.code));
 
 veilig("zelfvoorzienendheid", () => {
 /* ---------- zelfvoorzienendheid hoog in de pagina (#49) ----------
@@ -1185,27 +1488,12 @@ Object.entries(BV.indicatoren).forEach(([key,ind])=>{
 /* Keuzevakjes voor de referentie. De standaard doet het werk — dat is wat iemand ziet die
    niets aanklikt, en dat is het meeste gebruik — maar wie een andere peer wil kan hem
    aanzetten. */
-const rk = document.getElementById("referentieKeuze");
-if (rk && REF_KANDIDATEN.length) {
-  const uitleg = GEBIEDNIVEAU === "rayon"
-    ? "Vergelijk met de andere rayons — vergelijkbaar in omvang en functie. De gemeente " +
-      "bevat dit rayon zelf voor ruwweg een kwart, dus die vergelijking zegt minder."
-    : GEBIEDNIVEAU === "gemeente"
-      ? "De vier rayons als interne verdeling van de gemeente."
-      : "Vergelijk met de gemeente en met het rayon waar dit gebied onder valt.";
-  rk.innerHTML = `<span style="color:var(--asfalt-zacht)">${uitleg}</span><br>` +
-    REF_KANDIDATEN.map(r =>
-      `<label style="cursor:pointer;margin-right:12px;white-space:nowrap">` +
-      `<input type="checkbox" data-ref="${r.code}"${r.standaard ? " checked" : ""}> ` +
-      `<span style="color:${REF_KLEUR[r.niveau] || GRIJS}">${r.naam}</span></label>`).join("");
-  rk.querySelectorAll("input[data-ref]").forEach(cb => {
-    cb.addEventListener("change", () => {
-      if (cb.checked) refAan.add(cb.dataset.ref); else refAan.delete(cb.dataset.ref);
-      const actief = document.querySelector("#buurtToggle button.actief");
-      toonIndicator(actief ? actief.dataset.key : "inkomen");
-    });
-  });
-}
+/* De keuzevakjes zelf worden onderaan voor de hele pagina gebouwd (#7); dit blok schrijft
+   zich alleen in, zodat de buurtvergelijking meebeweegt met een keuze die elders is gemaakt. */
+bijRefWijziging("buurtvergelijking", () => {
+  const actief = document.querySelector("#buurtToggle button.actief");
+  toonIndicator(actief ? actief.dataset.key : "inkomen");
+});
 
 const nt = document.getElementById("niveauToggle");
 if (nt && heeftGebieden) {
@@ -1586,14 +1874,30 @@ box.hidden = false;
 
 veilig("grafiek-nabijheid", () => {
 /* nabijheid: horizontale balken, station uitgelicht */
-new Chart(chNabij, {type:"bar", data:{labels:D.nabijheid.labels, datasets:[{
-    data:D.nabijheid.values,
-    backgroundColor:D.nabijheid.labels.map(l => l === "Treinstation" ? "#B0452F" : POLDER),
-    borderColor:ASFALT, borderWidth:1
-  }]},
+const eigen = {label:GEBIEDLABEL, data:D.nabijheid.values,
+  backgroundColor:D.nabijheid.labels.map(l => l === "Treinstation" ? "#B0452F" : POLDER),
+  borderColor:ASFALT, borderWidth:1};
+const g = new Chart(chNabij, {type:"bar",
+  data:{labels:D.nabijheid.labels, datasets:[eigen]},
   options:{indexAxis:"y", maintainAspectRatio:false,
-    plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>` ${c.parsed.x.toLocaleString("nl-NL")} km`}}},
+    plugins:{legend:{display:false, position:"bottom"},
+      tooltip:{callbacks:{label:c=>
+        ` ${c.dataset.label}: ${c.parsed.x.toLocaleString("nl-NL")} km`}}},
     scales:{x:{grid:gridOpt, title:{display:true,text:"km over de weg"}}, y:{grid:{display:false}}}}});
+/* Deze grafiek krijgt (nog) géén referentiereeks, en dat is een bewuste uitzondering.
+
+   `D.nabijheid` wordt in het blok "cbs-verrijking" bovenaan overschreven door de
+   CBSMOB-variant, met vijf categorieën en andere namen: "Grote supermarkt" in plaats van
+   "Supermarkt", plus een kinderdagverblijf dat in profiel.js niet voorkomt. De referentielaag
+   komt uit de profielstap en kent die labels dus niet. Uitgelijnd op label leverde dat een
+   referentie op die bij twee van de vijf balken stond en bij drie niet — en een ontbrekende
+   balk leest als "daar is het nul", niet als "die vergelijking hebben we niet".
+
+   Hoort bij #88: de bron is de `cbs`-stap, die `bouw_referentie()` niet draait. Zodra die stap
+   meedoet komt hier dezelfde `bijRefWijziging()`-inschrijving als bij de andere grafieken.
+
+   Let op wat hier sowieso vergeleken wordt: een gemiddelde afstand, geen bereikbaarheidsmaat.
+   Het aandeel binnen de drempel staat een grafiek hoger en is het hoofdcijfer. */
 });
 
 veilig("ov-tabel", () => {
@@ -1892,15 +2196,36 @@ if (typeof CBSMOB !== "undefined" && CBSMOB.modalSplit) {
   }
 }
 if (!reeksen.length) return;
-new Chart(chModal, {type:"bar",
-  data:{labels:VERVOERWIJZEN, datasets:reeksen.map(r => ({
-    label:r.label, data:r.data, backgroundColor:r.kleur,
-    borderColor:ASFALT, borderWidth:1, maxBarThickness:13
-  }))},
+/* Referentiegebieden als extra reeks. Hun ODiN-verdeling gaat door dezelfde canonisering als
+   de eigen reeks: in de microdata heet het "Personenauto - bestuurder" en in de grafiek
+   "Auto", en twee reeksen die verschillend zijn gegroepeerd vergelijken niets. De drempel van
+   20 waarnemingen (#13) geldt ook hier — een categorie eronder valt weg in plaats van als
+   dunne balk mee te doen. */
+const refModal = () => refActief().filter(r => r.code !== GEMEENTECODE).map(r => {
+  const rijen = ((REF[r.code] || {}).odin || {}).modalSplit;
+  if (!Array.isArray(rijen)) return null;
+  const drempel = (ODINW.drempel && ODINW.drempel.nMin) || 20;
+  const bruikbaar = rijen.filter(x =>
+    !x.onderdrukt && !(typeof x.n === "number" && x.n < drempel));
+  if (!bruikbaar.length) return null;
+  return {label:`${r.naam} — ${r.niveau}`, kleur:refKleurVan(r), data:naarShares(bruikbaar)};
+}).filter(Boolean);
+const modalDataset = r => ({
+  label:r.label, data:r.data, backgroundColor:r.kleur,
+  borderColor:ASFALT, borderWidth:1, maxBarThickness:13});
+const gModal = new Chart(chModal, {type:"bar",
+  data:{labels:VERVOERWIJZEN, datasets:reeksen.map(modalDataset)},
   options:{indexAxis:"y", maintainAspectRatio:false,
     plugins:{legend:{position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label.split(" (")[0]}: ${nl(c.parsed.x)}% van de verplaatsingen`}}},
     scales:{x:{grid:gridOpt, title:{display:true,text:"% van de verplaatsingen"}}, y:{grid:{display:false}}}}});
+bijRefWijziging("modal-split", () => {
+  gModal.data.datasets = [...reeksen, ...refModal()].map(modalDataset);
+  gModal.update();
+});
+/* De modal split gaat door naarShares(), dus refDrempelTekst() (die op labels uitlijnt) past
+   hier niet; wat er onder de drempel viel staat al in de voetnoot van de eigen reeks via
+   odinOnderdruktTekst(). */
 const sub = document.getElementById("modalSub");
 if (sub) sub.textContent = "Aandeel verplaatsingen per hoofdvervoerwijze; drie meetniveaus naast elkaar.";
 const foot = document.getElementById("modalFoot");
@@ -2025,17 +2350,35 @@ if (!mWijk.length) { odinTeKlein("chMotief", "reismotieven"); return; }
 const labels = mWijk.map(r => r.label);
 const rdam = Object.fromEntries(odinZichtbaar(ODINW.motieven.rotterdam)
   .map(r => [r.label, r.share]));
-new Chart(chMotief, {type:"bar",
-  data:{labels, datasets:[
-    {label:GEBIEDLABEL, data:ODINW.motieven.wijk.map(r => r.share),
-     backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:14},
-    {label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
-     backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:14}
-  ]},
+const eigenReeksen = () => [
+  {label:GEBIEDLABEL, data:labels.map(l =>
+     (mWijk.find(r => r.label === l) || {}).share ?? null),
+   backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:14},
+  {label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
+   backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:14},
+];
+const gMotief = new Chart(chMotief, {type:"bar",
+  data:{labels, datasets:eigenReeksen()},
   options:{indexAxis:"y", maintainAspectRatio:false,
     plugins:{legend:{position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${nl(c.parsed.x)}%`}}},
     scales:{x:{grid:gridOpt, title:{display:true,text:"% van de verplaatsingen"}}, y:{grid:{display:false}}}}});
+/* De gemeentereeks blijft staan — die komt uit dezelfde ODiN-uitdraai en is de ijking die er
+   altijd was. De instelbare referenties komen ernaast, met dezelfde drempel van 20
+   waarnemingen als de eigen reeks (#13). */
+const motiefFoot = document.getElementById("motiefFoot");
+const motiefBasis = motiefFoot ? motiefFoot.textContent : "";
+bijRefWijziging("motieven", () => {
+  gMotief.data.datasets = [...eigenReeksen(),
+    ...refDatasets("odin.motieven", labels, {maxBarThickness:9, zonder:[GEMEENTECODE]})];
+  gMotief.update();
+  /* Wat er uit een referentiereeks is weggelaten hoort onder de grafiek, niet in de console:
+     anders sluiten de aandelen van een peer stil niet op 100%. */
+  if (motiefFoot) {
+    motiefFoot.textContent = motiefBasis +
+      refDrempelTekst("odin.motieven", labels, {zonder:[GEMEENTECODE]});
+  }
+});
 });
 
 veilig("odin-bestemmingen", () => {
@@ -2085,17 +2428,24 @@ veilig("odin-dagdelen", () => {
 if (typeof ODINW === "undefined" || ODINW.leeg) return;
 const labels = odinZichtbaar(ODINW.dagdelen.wijk).map(r => r.label);
 const rdam = Object.fromEntries(odinZichtbaar(ODINW.dagdelen.rotterdam).map(r => [r.label, r.share]));
-new Chart(chDagdeel, {type:"bar",
-  data:{labels, datasets:[
-    {label:GEBIEDLABEL, data:ODINW.dagdelen.wijk.map(r => r.share),
-     backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:44},
-    {label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
-     backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:44}
-  ]},
+const eigenReeksen = () => [
+  {label:GEBIEDLABEL, data:labels.map(l =>
+     (ODINW.dagdelen.wijk.find(r => r.label === l) || {}).share ?? null),
+   backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:44},
+  {label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
+   backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:44},
+];
+const gDagdeel = new Chart(chDagdeel, {type:"bar",
+  data:{labels, datasets:eigenReeksen()},
   options:{maintainAspectRatio:false,
     plugins:{legend:{position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${nl(c.parsed.y)}%`}}},
     scales:{y:{grid:gridOpt, ticks:{callback:v=>v+"%"}}, x:{grid:{display:false}}}}});
+bijRefWijziging("dagdelen", () => {
+  gDagdeel.data.datasets = [...eigenReeksen(),
+    ...refDatasets("odin.dagdelen", labels, {maxBarThickness:22, zonder:[GEMEENTECODE]})];
+  gDagdeel.update();
+});
 });
 
 veilig("odin-bezoekers", () => {
@@ -2256,8 +2606,7 @@ if (luchtToggle && luchtStof && luchtLegenda) {
       inhoud = (g == null)
         ? "Geen waarde op deze plek."
         : `<b>${label}</b> hier: ${Number(g).toLocaleString("nl-NL", {maximumFractionDigits:1})} µg/m³` +
-          `<br><i>RIVM/NSL jaargemiddelde ${luchtPeiljaar ?? ""}</i>` +
-          normtoets(luchtStof.value.includes("NO2") ? "lucht_no2" : "lucht_pm25", Number(g));
+          `<br><i>RIVM/NSL jaargemiddelde ${luchtPeiljaar ?? ""}</i>`;
     } catch (err) {
       inhoud = "Waarde niet opgehaald (RIVM niet bereikbaar?).";
     }
@@ -3492,22 +3841,48 @@ function toon(sleutel) {
     data: {
       labels: r.jaren,
       datasets: [{
+        label: GEBIEDLABEL,
         data: punten,
         borderColor: ASFALT, backgroundColor: GEEL, borderWidth: 2.5,
         pointRadius: 5, pointBackgroundColor: stijl, pointBorderColor: ASFALT,
         pointBorderWidth: 2,
         /* false: de lijn springt niet over een ontbrekend jaar heen. Dat is het hele punt. */
         spanGaps: false,
-      }],
+      },
+      /* Referentiereeksen in dezelfde eenheid, dus zonder index: WOZ in duizenden euro's is
+         voor een rayon en voor de gemeente hetzelfde getal-formaat. Alleen de jaren die deze
+         reeks zelf heeft, uitgelijnd op het jaarlabel.
+
+         De open stip voor een onvolledige jaargang geldt hier ook. `volledig` is bij een
+         tijdreeks geen vlag maar een lijst per jaar — een reeks kan in 2019 op alle wijken
+         rusten en in 2024 op een deel — dus dat kan refDatasets() niet generiek doen. */
+      ...refReeksen(`reeksen.${sleutel}`, r.jaren).map(ref => {
+        /* Uit refReeksen() en niet uit refDatasets(): die laatste laat reeksen zonder enkele
+           bruikbare waarde weg, en dan lopen de posities niet meer gelijk met refActief().
+           Hier is de code van het gebied nodig om zijn eigen volledig-lijst op te halen. */
+        const vol = ((REF[ref.code] || {}).reeksen || {})[sleutel]?.volledig;
+        return refLijn(ref, ref.waarden, {
+          pointBackgroundColor: ref.waarden.map((w, j) =>
+            w === null ? "transparent"
+              : (Array.isArray(vol) && vol[j] === false ? "#FAFAF5" : ref.kleur)),
+        });
+      })],
     },
     options: {
       maintainAspectRatio: false,
       plugins: {
-        legend: {display: false},
+        legend: {display: refActief().length > 0, position: "bottom"},
         tooltip: {callbacks: {label: c => {
           const i = c.dataIndex;
+          /* De verantwoording over onvolledige jaargangen geldt de eigen reeks; een
+             referentiereeks draagt zijn eigen volledigheid niet mee en doet die bewering dus
+             niet. */
+          if (c.datasetIndex > 0) {
+            return c.parsed.y == null ? " geen cijfer in deze jaargang"
+              : ` ${c.dataset.label}: ${nl1(c.parsed.y)} ${r.eenheid}`;
+          }
           if (r.waarden[i] === null) return " geen cijfer in deze jaargang";
-          return ` ${nl1(r.waarden[i])} ${r.eenheid}` +
+          return ` ${c.dataset.label}: ${nl1(r.waarden[i])} ${r.eenheid}` +
             (r.volledig[i] === false ? " (ondergrens: niet alle wijken)" : "");
         }}},
       },
@@ -3560,5 +3935,154 @@ for (const [sleutel, r] of bruikbaar) {
   toggle.appendChild(b);
 }
 toon(bruikbaar[0][0]);
+/* Deze grafiek wordt bij elke wissel opnieuw opgebouwd, dus hertekenen = opnieuw tonen wat
+   er nu geselecteerd staat. */
+bijRefWijziging("tijdreeks", () => {
+  const actief = toggle.querySelector("button.actief");
+  toon(actief ? actief.dataset.reeks : bruikbaar[0][0]);
+});
 box.hidden = false;
+});
+
+
+veilig("segmenten", () => {
+/* ---------- #8: soorten bewoners ----------
+   De gemiste invalshoek: het onderscheid tussen gebieden gaat over meer dan inkomen alleen.
+   De CPB-indeling is niet openbaar op wijkniveau (onderzoek staat in issue #8); dit is CBS'
+   eigen SES-WOA — financiële welvaart, opleidingsniveau en arbeidsverleden gecombineerd, met
+   de spreiding bínnen het gebied en een 95%-interval erbij.
+
+   De score is relatief: 0 is het landelijk gemiddelde. Een score zonder die referentie is
+   betekenisloos, dus die staat in elke regel. */
+if (typeof SEGMENTEN === "undefined") return;
+const box = document.getElementById("segmentenBox");
+const tb = document.querySelector("#segmentenTabel tbody");
+const canvas = document.getElementById("chSegmenten");
+if (!box || !tb || !canvas || typeof Chart === "undefined") return;
+
+const S = SEGMENTEN;
+/* Drie decimalen, want CBS publiceert er drie en de scores liggen dicht bij nul: op twee
+   decimalen werd het 95%-interval van Overschie "-0,01 tot 0,00", wat leest als een lege
+   uitspraak terwijl de bron -0,011 tot -0,004 zegt. */
+const nl3 = v => typeof v !== "number" ? "—"
+  : v.toLocaleString("nl-NL", {minimumFractionDigits: 3, maximumFractionDigits: 3,
+                               signDisplay: "exceptZero"});
+
+/* Woorden bij het getal, want een z-scoreachtige waarde zegt een adviseur niets. Bewust
+   beschrijvend en niet waarderend: "onder het landelijk gemiddelde" is een feit, "slecht" een
+   oordeel — dat blijft #30. */
+function betekenis(v) {
+  if (typeof v !== "number") return "niet gepubliceerd";
+  const richting = v > 0 ? "boven" : v < 0 ? "onder" : "gelijk aan";
+  const sterkte = Math.abs(v) < 0.05 ? "vlak " : Math.abs(v) < 0.25 ? "" : "duidelijk ";
+  return v === 0 ? "gelijk aan het landelijk gemiddelde"
+    : `${sterkte}${richting} het landelijk gemiddelde`;
+}
+
+const dimensies = [
+  ["totaal", "Totaalscore SES-WOA"],
+  ["welvaart", "Financiële welvaart"],
+  ["opleiding", "Opleidingsniveau"],
+  ["arbeid", "Arbeidsverleden"],
+];
+for (const [sleutel, naam] of dimensies) {
+  const v = S.gebied[sleutel];
+  const onder = sleutel === "totaal" ? S.gebied.totaal_onder : null;
+  const boven = sleutel === "totaal" ? S.gebied.totaal_boven : null;
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    `<td>${naam}</td>` +
+    `<td class="getal"><b>${nl3(v)}</b>` +
+    (typeof onder === "number" && typeof boven === "number"
+      ? `<div style="font-size:11px;color:#7a7a6c">95%: ${nl3(onder)} tot ${nl3(boven)}</div>`
+      : "") +
+    "</td>" +
+    `<td>${betekenis(v)}</td>`;
+  tb.appendChild(tr);
+}
+/* De spreiding is de reden dat dit dashboard bestaat: bij een hoge spreiding beschrijft het
+   gebiedscijfer niemand. CBS publiceert hem hier zelf, in plaats van dat wij hem afleiden. */
+if (typeof S.gebied.spreiding === "number") {
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    "<td>Spreiding binnen het gebied</td>" +
+    `<td class="getal"><b>${S.gebied.spreiding.toLocaleString("nl-NL",
+      {minimumFractionDigits: 2, maximumFractionDigits: 2})}</b></td>` +
+    `<td>${S.gebied.spreiding > 1 ? "meer" : "minder"} verschil tussen huishoudens dan ` +
+    "landelijk gemiddeld (1,00)</td>";
+  tb.appendChild(tr);
+}
+
+/* Arbeidsverleden per deelgebied: bij een rayon de drie gebieden, bij een wijk de buurten.
+   Dat is waar "soorten bewoners" ruimtelijk zichtbaar wordt. */
+const heeftWijken = Object.keys(S.perWijk || {}).length > 0;
+const eenheden = heeftWijken
+  ? Object.entries(S.perWijk).map(([code, v]) => [
+      (typeof GEBIEDEN !== "undefined"
+        ? (GEBIEDEN.rayons || []).flatMap(r => r.gebieden || []).find(x => x.code === code)?.naam
+        : null) || code, v])
+  : Object.entries(S.perBuurt || {});
+const rijen = [[GEBIEDNAAM, S.gebied], ...eenheden];
+const KLEUREN = [POLDER, SCHIE, "#B0452F", GRIJS];
+
+new Chart(canvas, {
+  type: "bar",
+  data: {
+    labels: rijen.map(([naam]) => naam),
+    datasets: S.arbeidsverleden.sleutels.map((sleutel, i) => ({
+      label: S.arbeidsverleden.labels[i],
+      backgroundColor: KLEUREN[i], borderColor: ASFALT, borderWidth: 1,
+      data: rijen.map(([, v]) => typeof v[sleutel] === "number"
+        ? Math.round(v[sleutel] * 10) / 10 : null),
+    })),
+  },
+  options: {
+    indexAxis: "y", maintainAspectRatio: false,
+    scales: {x: {stacked: true, max: 100, grid: gridOpt,
+                 title: {display: true, text: S.arbeidsverleden.eenheid}},
+             /* eigen gebied vet, zoals bij zelfvoorzienendheid: anders is niet te zien welke
+                rij het onderwerp is en welke de uitsplitsing */
+             y: {stacked: true, grid: {display: false},
+                 ticks: {font: c => ({weight: c.index === 0 ? "700" : "400", size: 11})}}},
+    plugins: {
+      legend: {position: "bottom", labels: {boxWidth: 12, font: {size: 11}}},
+      tooltip: {callbacks: {label: c => ` ${c.dataset.label}: ` +
+        `${c.parsed.x.toLocaleString("nl-NL")}%`}},
+    },
+  },
+});
+
+const deelRichtingen = new Set(["welvaart", "opleiding", "arbeid"]
+  .map(k => S.gebied[k])
+  .filter(v => typeof v === "number")
+  .map(v => Math.sign(v)));
+const agg = S.aggregatie || {};
+document.getElementById("segmentenSub").textContent =
+  `${GEBIEDNAAM} scoort ${nl3(S.gebied.totaal)} op de gecombineerde SES-WOA-score: ` +
+  `${betekenis(S.gebied.totaal)}. Opgebouwd uit welvaart ${nl3(S.gebied.welvaart)}, ` +
+  `opleidingsniveau ${nl3(S.gebied.opleiding)} en arbeidsverleden ${nl3(S.gebied.arbeid)}` +
+  /* Alleen zeggen dat de deelscores uiteenlopen als dat zo is; anders is het een bewering over
+     de data in plaats van een beschrijving ervan. */
+  (deelRichtingen.size > 1
+    ? " — de deelscores lopen dus niet dezelfde kant op."
+    : ", alle drie dezelfde kant op.");
+document.getElementById("segmentenFoot").innerHTML =
+  `${S.bron}, peiljaar ${S.peildatum}. ${S.caveat}` +
+  (agg.regel && agg.regel !== "gepubliceerd"
+    ? ` Samengesteld uit ${agg.nWijken} wijken, gewogen naar ${agg.gewicht}.` +
+      (agg.intervalWeggelaten ? ` <b>${agg.intervalWeggelaten}</b>` : "")
+    : "");
+box.hidden = false;
+});
+
+veilig("referentiekeuze", () => {
+/* ---------- de bedieningen, nadat alle grafieken zich hebben ingeschreven (#7) ----------
+   Onderaan en niet bovenaan: een grafiek schrijft zich in tijdens het opbouwen van zijn
+   eigen blok, en een keuzevakje dat klikbaar is voordat er iets luistert doet niets. */
+document.querySelectorAll("[data-refkeuze]").forEach(bouwRefKeuze);
+/* En één keer tekenen met de standaardkeuze. De grafieken zijn opgebouwd zonder referentie —
+   ze schrijven zich in en wachten — dus zonder deze regel staan de vakjes aan terwijl er
+   niets getekend is. Dat is het ergste van twee werelden: een bewering in de bediening die
+   het beeld niet waarmaakt. */
+refGewijzigd();
 });

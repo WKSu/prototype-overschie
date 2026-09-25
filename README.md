@@ -11,38 +11,80 @@ interpretatie staat uitsluitend in het expliciet gelabelde duidingsblok (sectie 
 index.html            alle opmaak en secties (hero, gebied, buurtvergelijking, bevolking,
                       sociaal-economisch, wonen, mobiliteit, verplaatsingspatronen,
                       voorzieningen, duiding)
-js/data.js            redactioneel: alleen de buurttyperingen; alle cijferreeksen komen
-                      uit js/profiel.js en worden bij het laden hierover heen gelegd
-js/profiel.js         GEGENEREERD — wijkprofiel uit CBS KWB/nabijheid (groei, leeftijd,
-                      huishoudens, inkomen, opleiding, buurtvergelijking incl. armoede)
-js/app.js             grafieken (Chart.js), kaarten (Leaflet, CartoDB Positron), interactie
-js/regios.js          GEGENEREERD — gebiedsboom gemeente/rayon/gebied + de wijken buiten de
-                      rayonindeling (PDOK, CC0; rayonindeling gemeente Rotterdam)
-js/geo.js             GEGENEREERD — buurtpolygonen (PDOK, CC0)
-js/ov.js              GEGENEREERD — OV-haltes, lijnen, routegeometrie, ritfrequenties en
-                      uurprofiel (GTFS NDOV/OVapi)
-js/ongevallen.js      GEGENEREERD — verkeersongevallen (BRON via RWS WFS, CC0): hotspotraster
-                      van 100 m per jaar en afloop, plus losse punten met details
-js/infra.js           GEGENEREERD — fietsnetwerk, snelwegkruisingen, omrijfactor (OSM)
-js/voorzieningen.js   GEGENEREERD — voorzieningen in 5 categorieën + vergelijking met de
-                      gemeente per 1.000 inwoners (OSM + CBS)
-js/cbs_mobiliteit.js  GEGENEREERD — nabijheid & auto's/hh per buurt, gemeentereferenties,
+
+js/                   handgeschreven frontend
+  laad.js             leest het gebied uit de URL-hash (#gebied=…) en injecteert de
+                      databestanden van dat gebied als <script>-tags, daarna app.js
+  app.js              grafieken (Chart.js), kaarten (Leaflet, PDOK BRT Achtergrondkaart
+                      grijs), referentielaag en interactie; elk blok in een veilig()-guard
+  data.js             redactioneel: de buurttyperingen
+  teksten.js          redactioneel: karakterisering en duiding per gebied; ontbreekt een
+                      gebied, dan een neutrale formulering uit de data
+  review.js           reviewmodus, alleen geladen met ?review=1
+
+data/                 GEGENEREERD door scripts/bouw_data.py — niet met de hand bewerken
+  index.js            gebiedsboom (gemeente → rayons → gebieden, plus de wijken buiten de
+                      rayonindeling), inventaris van data-elementen, normen (#30) en de
+                      losse verkenners met hun deeplink per gebied
+  referentie.js       gebiedstotalen, verdelingen, groei en tijdreeksen van álle gebieden,
+                      voor de vergelijkingsreeksen (--referentie)
+  gebouwd.js          lokale bouwstatus: welke stappen per gebied gebouwd zijn — gitignored
+  <gebiedcode>/       één map per gebied (GM0599, RAYON_*, WK0599xx):
+    profiel.js        wijkprofiel uit CBS KWB/nabijheid (groei, leeftijd, huishoudens,
+                      inkomen, opleiding, buurtvergelijking incl. armoede)
+    geo.js            buurtpolygonen (PDOK, CC0)
+    ov.js             OV-haltes, lijnen, routegeometrie, ritfrequenties en uurprofiel
+                      (GTFS NDOV/OVapi)
+    ongevallen.js     verkeersongevallen (BRON via RWS WFS, CC0): hotspotraster van 100 m
+                      per jaar en afloop, plus losse punten met details
+    infra.js          fietsnetwerk, snelwegkruisingen, omrijfactor (OSM)
+    voorzieningen.js  voorzieningen in 5 categorieën + vergelijking met de gemeente per
+                      1.000 inwoners (OSM + CBS)
+    cbs_mobiliteit.js nabijheid & auto's/hh per buurt, gemeentereferenties,
                       ODiN-modal-split provincie (StatLine)
-js/odin_wijk.js       GEGENEREERD — verplaatsingspatronen wijkbewoners uit ODiN-microdata
-                      (alleen aggregaten, zie AVG-paragraaf)
-scripts/bouw_data.py  bouwt alle gegenereerde bestanden (PEP 723, zie hieronder)
-scripts/regios.py     gebiedsindeling Rotterdam: rayon -> CBS-wijken. Bron van waarheid voor
+    odin_wijk.js      verplaatsingspatronen bewoners uit ODiN-microdata (alleen
+                      aggregaten, zie AVG-paragraaf)
+    segmenten.js      soorten bewoners: CBS SES-WOA per wijk (#8)
+    intern.js         geaggregeerde uitkomsten uit de niet-openbare leveringen, boven de
+                      onthullingsdrempel (zie bronnen/intern/)
+
+scripts/              pipeline, registry's en controles
+  bouw_data.py        bouwt alle gegenereerde bestanden (PEP 723, zie hieronder)
+  regios.py           gebiedsindeling Rotterdam: rayon -> CBS-wijken. Bron van waarheid voor
                       het rayonniveau; netwerkvrij en offline te controleren
-scripts/indicatoren.py registry van de buurtvergelijking-indicatoren: bron, zoekterm,
-                      aggregatieregel, noemer, afronding en kaartlaag per indicator.
-                      Eén entry toevoegen = een werkende indicator
-scripts/aggregatie.py som, gewogen gemiddelde en niet-aggregeerbaar, met de CBS-
+  indicatoren.py      registry van de indicatoren: bron, zoekterm, aggregatieregel, noemer,
+                      afronding en kaartlaag per indicator, plus de inventaris, DREMPELS en
+                      NORMEN. Eén entry toevoegen = een werkende indicator
+  aggregatie.py       som, gewogen gemiddelde en niet-aggregeerbaar, met de CBS-
                       onderdrukkingscodes; netwerkvrij
-scripts/rooktest.js   controleert een gedumpte DOM: is elk verwacht element gevuld
-scripts/check_indicatoren.py  toetst de registry tegen een gebouwd profiel.js
-scripts/cache/        gedownloade brondata (GTFS ~230 MB, PC4-geometrie, OSM-cache) én de
-                      lokaal geplaatste ODiN-microdata (map ODIN/<jaar>/) — niet meeleveren
+  bronnen_intern.py   registry van de niet-openbare leveringen: map, verwachte bestanden,
+                      aggregatieregel, voorwaarden en onthullingsdrempel per bron
+  intern_lezers.py    één lezer per levering: welk werkblad, welke kolom, welke koppeling
+                      — en waar je in dat bestand verkeerd kunt lezen zonder dat het opvalt
+  inspecteer_intern.py  beschrijft een levering (kolommen, typen, aantallen) zonder
+                      celwaarden te tonen; draaien vóór je een bron aanmeldt
+  viewers.py          registry van de losse verkenners: URL, (sub)sectie, ankers en de per
+                      gebied uitgerekende deeplink
+  rooktest.js         controleert een gedumpte DOM: is elk verwacht element gevuld, heeft
+                      elk ODiN-blok een label, elke kaart een vergrootknop, scrollt de
+                      pagina niet zijwaarts
+  check_indicatoren.py  toetst de registry tegen een gebouwd profiel.js
+  check_referentielaag.js  draait de referentielaag uit js/app.js in Node tegen
+                      data/referentie.js: lijnen de reeksen uit op de gebiedslabels,
+                      geldt de ODiN-drempel, is een ondergrens gemarkeerd
+  check_onderwerpen.js  controleert de review-ankers (data-onderwerp) in een gedumpte DOM
+                      tegen de momentopname onderwerpen.txt
+  onderwerpen.txt     momentopname van de review-ankers
+  check_viewers.py    toetst (met netwerk) of de deeplinks van de verkenners nog op het
+                      bedoelde gebied uitkomen
+  cache/              gedownloade brondata (GTFS ~230 MB, PC4-geometrie, OSM-cache) én de
+                      lokaal geplaatste ODiN-microdata (map ODIN/<jaar>/) — gitignored,
+                      niet meeleveren
+
+bronnen/intern/       inleverplek voor niet-openbare leveringen — buiten git, alleen
+                      LEESMIJ.md staat in de repo
 assets/               chart.umd.js 4.4.1, leaflet.js/css 1.9.4 — lokaal gevendord
+.claude/commands/     volgende.md: de procedure voor /volgende
 ```
 
 ## Data verversen
@@ -63,6 +105,7 @@ uv run scripts/bouw_data.py --gebied GM0599 --alleen geo
 uv run scripts/bouw_data.py --alleen odin      # alleen de ODiN-microdata-analyse
 uv run scripts/bouw_data.py --alleen profiel   # wijkprofiel (vervangt handmatige data.js)
 uv run scripts/bouw_data.py --alleen ongevallen # BRON-verkeersongevallen (RWS WFS)
+uv run scripts/bouw_data.py --alleen intern    # niet-openbare leveringen, alleen geaggregeerd
 ```
 
 Het script kiest **automatisch de nieuwste gepubliceerde jaargang** per bron (CBS-catalogus,
@@ -122,11 +165,78 @@ indicator volgt apart.
 | BRON via Rijkswaterstaat WFS | verkeersongevallen (locatie, afloop, partijen) | locatie | jaarlijks (± april; rollend 3-jaarsvenster, lokale cache) | CC0 |
 | RIVM Atlas Leefomgeving WMS | NO₂/PM2,5-jaargemiddelde (NSL-monitoring, kaartlaag) | raster ±25 m | jaarlijks | CC BY |
 | OpenStreetMap via OSMnx | netwerk, kruisingen, voorzieningen (wijk + gemeente) | locatie | doorlopend | ODbL |
-| Kaartondergrond | CartoDB Positron | — | — | © OSM-bijdragers © CARTO |
+| PDOK BRT Achtergrondkaart (WMTS) | kaartondergrond, grijze variant | — | doorlopend | naamsvermelding © Kadaster |
 
 Bewust **niet** gebruikt: PDF-/rapportcijfers en incidentele maatwerktabellen. Een reguliere
 wijk-modal-split bestaat niet — daarom de microdata-route hierboven, met de provincie als
 gepubliceerde referentie.
+
+## Niet-openbare bronnen
+
+Een deel van de interessantste data wordt geléverd in plaats van gepubliceerd: arbeidsplaatsen
+(#29), parkeervergunningen en wachtlijst (#22), meldingen openbare ruimte (#26), de
+omnibusenquête (#27). Die leveringen gaan in `bronnen/intern/<map>/` — buiten git — en worden
+aangemeld in `scripts/bronnen_intern.py`. De stap `intern` schrijft er **uitsluitend
+geaggregeerde uitkomsten** per gebied uit, boven de onthullingsdrempel `n_min` van die bron;
+alleen díe uitkomsten worden gecommit.
+
+| Bron | Wat | Niveau | Verversing | Voorwaarden |
+|---|---|---|---|---|
+| CBS-maatwerktabel autobezit (CBS, RDW, BAG) | auto's per woonadres en de verdeling 0/1/2+, 1 jan 2019–2025 | subbuurt | op aanvraag | CBS-maatwerk voor de gemeente; alleen geaggregeerd publiceren |
+| KVK Bedrijven op de Kaart | vestigingen met ≥5 werkenden en hun grootteklasse + SBI-sector | vestiging (punt) | op aanvraag | KVK-voorwaarden; geen bedrijfsnamen of adressen |
+| Vergunningenplafond (Parksaver, BAG, CBS) | toegekende vergunningen, wachtlijst, plafond, bezetting | parkeersector | op aanvraag | interne werktabel; alleen per sector publiceren |
+| **Wijkprofiel Rotterdam** (dataset voor derden) | Sociale, Fysieke en Veiligheidsindex, 2014–2026 | gebied + Rotterdamse wijk | tweejaarlijks | *reguliere publicatie*; vrij met bronvermelding |
+
+De laatste is geen niet-openbare bron: hij ligt hier omdat hij als bestand werd aangeleverd.
+Het registryveld `openbaar` legt dat vast, en dat bepaalt of de badge *niet-openbare bron* bij
+een grafiek verschijnt. Dat onderscheid zegt of een lezer het cijfer zelf kan narekenen.
+
+Wat elk van de vier oplevert:
+
+- **Autobezit** — reeks per woonadres 2019–2025, de verdeling 0/1/2/3/4+ per peiljaar, en de
+  subbuurten op de kaart (sectie 06). De koppeling subbuurt → gebied loopt via de meegeleverde
+  subbuurtenkaart en matcht op 501 van de 501 codes, dus aggregeren naar gebied en rayon is
+  exact. De noemer is het **woonadres**, niet het huishouden: dit cijfer is daarom niet gelijk
+  aan `auto's per huishouden` uit de KWB.
+- **Vestigingen en werkzame personen** — aantallen en de sectorverdeling per SBI-sectie
+  (sectie 04). Geen arbeidsplaatsentelling: alleen vestigingen met vijf of meer werkenden, in
+  grootteklassen, dus het aantal werkzame personen is een ondergrens.
+- **Parkeervergunningen** — per sector die het gebied voor ≥5 % raakt: vergunningen,
+  wachtlijst, plafond en bezetting, met kaart (sectie 06). Geen gebiedstotaal — sectoren
+  overlappen elkaar en volgen de gebiedsgrens niet.
+- **Wijkprofiel** — de drie hoofdscores per peiljaar voor het gebied, met de Rotterdamse
+  wijken erbinnen (sectie 02). Een rayonscore bestaat niet; bij een rayon dus een lijn per
+  gebied.
+
+Wat er bij zo'n bron anders is dan bij de open bronnen hierboven:
+
+- **Niet na te rekenen door een derde.** Een cijfer uit deze categorie krijgt daarom in de
+  datastatus de eigen status `niet-openbare bron`, en in het blok zelf de bron, de
+  leveringsvoorwaarden en de gehanteerde drempel.
+- **Onder de drempel blijft het leeg, niet nul.** Een buurt met te weinig waarnemingen telt als
+  *onderdrukt*: het gebiedstotaal is dan onvolledig, niet lager. Dezelfde regel als bij de
+  CBS-onderdrukkingscodes en de ODiN-drempel.
+- **Een lege run overschrijft nooit een gevuld bestand.** Wie zonder de leveringen een
+  volledige herbouw doet, houdt de gecommitte uitkomsten; de stap meldt dat hij overslaat.
+
+Voordat je een bron aanmeldt: `uv run scripts/inspecteer_intern.py` beschrijft wat er in een
+levering zit — bestanden, kolommen, typen, aantallen, kandidaat-gebieds- en
+coördinaatkolommen — zonder celwaarden te tonen. Zie verder `bronnen/intern/LEESMIJ.md`.
+
+## Losse verkenners
+
+Naast dit dashboard staan er afzonderlijke producten die één vraag dieper beantwoorden. Ze
+hebben een eigen repo en eigen publicatie; hier staan alleen de verwijzing en de deeplink, in
+`scripts/viewers.py`.
+
+| Verkenner | Wat | Deeplink per gebied |
+|---|---|---|
+| [Parkeercapaciteit per gebied](https://wksu.github.io/parkeercapaciteit/) | parkeercapaciteit tot op het losse vak, met eigen telregels | ja — ook voor een rayon, als selectie van zijn gebieden |
+| [Invloedsgebied ov-haltes](https://wksu.github.io/loopbaarheid-ov/) | wat op loopafstand van welke halte ligt, over het looproutenetwerk | nee — dit product kent geen gebiedsselectie |
+
+Ze verschijnen als kaart in sectie 06, met een knop die de verkenner pas op de pagina laadt als
+je erop klikt. Dat is bewust: `loopbaarheid-ov` is één HTML-bestand van ruim 35 MB, en het
+dashboard moet ook zonder internet openen. Openen in een nieuw tabblad kan altijd.
 
 ## ODiN-microdata: methode, representativiteit en AVG
 
@@ -135,13 +245,16 @@ gepubliceerde referentie.
   3045, 3046, 3047 → **146 personen / 474 verplaatsingen** gepoold over 2022–2023.
 - **Pooling & weging**: gewicht `FactorV`, gedeeld door het aantal gepoolde jaren.
   Rotterdam-referentie (WoGem=599) uit dezelfde bestanden: ±16.800 verplaatsingen.
-- **Onthulling**: categorieën met **n<10 worden samengevoegd**; blokken met te weinig
-  waarnemingen vervallen. In `js/odin_wijk.js` staan uitsluitend aggregaten; de microdata
+- **Onthulling**: geen getoonde uitkomst rust op minder dan **20 waarnemingen** (`N_MIN` in
+  `scripts/bouw_data.py`, #13). Categorieën eronder worden **leeggelaten, niet samengevoegd**:
+  ze vallen uit de verdeling en staan als aparte verantwoordingsregel ("niet getoond — k
+  categorie(ën) met n<20"), zodat de getoonde aandelen niet stil op minder dan 100% sluiten.
+  Een heel blok onder de drempel vervalt. In `data/<gebiedcode>/odin_wijk.js` staan uitsluitend aggregaten; de microdata
   blijft in `scripts/cache/ODIN/` en hoort niet in verspreide kopieën van dit dashboard.
 - **Waarom 2024 ontbreekt**: de DANS-editie 2024 bevat geen woonlocatie (WoPC/WoGem) en
   alleen PRAM-verstoorde postcodes (`VertPC_PRAM`) — ongeschikt voor bewonersselectie.
 - **Interpretatiegrens**: wijkniveau, geen buurtniveau of kruistabellen; uren samengevat
-  tot dagdelen; bestemmingen alleen benoemd bij ≥10 waarnemingen (binnen de gemeente per
+  tot dagdelen; bestemmingen alleen benoemd bij ≥20 waarnemingen (binnen de gemeente per
   bestemmingswijk via dominante PC4-overlap).
 
 ## Kaarten en grafieken (sectie 06)
@@ -177,7 +290,8 @@ gepubliceerde referentie.
   die cache weggooit, verliest oudere jaren onherstelbaar.
 
 Sectie 07 bevat daarnaast de ODiN-grafiek **vervoerwijze naar afstand** (gewogen modal
-split per afstandsband, wijk naast Rotterdam; cellen met n<10 gevouwen in "Overig").
+split per afstandsband, wijk naast Rotterdam; vervoerwijzen met n<20 binnen een band
+vallen uit de verdeling en staan als aparte verantwoordingsregel).
 
 ## Kaartlagen (sectie 02)
 
@@ -195,7 +309,7 @@ split per afstandsband, wijk naast Rotterdam; cellen met n<10 gevouwen in "Overi
 
 ## Internet-afhankelijke onderdelen
 
-Alleen de kaartondergrond (CARTO-tegels) en de CBS 100×100m-laag (PDOK WMS + legenda)
+Alleen de kaartondergrond (PDOK WMTS-tegels) en de CBS 100×100m-laag (PDOK WMS + legenda)
 vereisen internet. Grafieken, buurtpolygonen, OV-haltes, voorzieningen en alle
 ODiN-uitkomsten werken volledig offline.
 
@@ -220,9 +334,55 @@ ODiN-uitkomsten werken volledig offline.
   (RIVM/NSL) op de fietskaart; BRON-ongevallenkaart (RWS WFS, lokale jaarcache);
   ODiN vervoerwijze × afstandsband.
 
+## Reviewmodus
+
+Voor een reviewronde met collega's: zet `?review=1` achter de URL
+(`index.html?review=1`, of op GitHub Pages `…/index.html?review=1#gebied=WK059904`).
+Zonder die parameter wordt `js/review.js` niet geladen — voor een gewone bezoeker
+bestaat de laag niet, hij is niet alleen verborgen.
+
+Wat een reviewer kan doen, en niets ervan is verplicht:
+
+- **per kaart, tabel of kerncijfervierkant** één klik op *onmisbaar · nuttig · niet
+  interessant · anders vormgeven*, plus desgewenst een toelichting en de opgave die het
+  raakt. De vraag is nadrukkelijk niet of het cijfer klopt — dat is de pipeline — maar of
+  de indicator nuttig is en of hij zo getekend moet worden;
+- **per sectie** "wat mis je hier?", want het antwoord op *sluit dit aan op onze opgaven*
+  is vaak "wat ik nodig heb staat er niet", en daar is geen kaart voor om op te klikken;
+- **één slotvraag** over het geheel.
+
+Alles staat in de `localStorage` van de reviewer zelf; er gaat niets naar een server.
+**Dat is geen bewaarplaats**: wie zijn browser opschoont of van apparaat wisselt is zijn
+opmerkingen kwijt. Het geëxporteerde bestand is de bron van waarheid, dus de balk onderaan
+waarschuwt zolang er niet geëxporteerd is, en de pagina vraagt bij het sluiten om bevestiging.
+
+Twee exports:
+
+- **Exporteer JSON** — alleen de eigen opmerkingen, herimporteerbaar. Meerdere bestanden
+  tegelijk importeren voegt ze samen op reviewer: een tweede export van dezelfde persoon
+  vervangt zijn eerdere, die van een ander blijft staan.
+- **Markdown voor issue** — alle geïmporteerde reviewers samengevoegd, gegroepeerd per
+  onderwerp, met een tabel van waar de meeste twijfel zit. Klaar om als issuebody te plakken.
+
+Een opmerking hangt aan het `data-onderwerp`-attribuut van de kaart, niet aan een
+selectorpad of de koptekst: `js/app.js` herschrijft koppen en niveaubadges per gebied, dus
+een afgeleid anker zou per gebied verspringen. Toont een kaart meerdere indicatoren achter
+een knoppenrij (de buurtvergelijking, het inkomen, de tijdreeks), dan draagt de sleutel de
+actieve keuze: `buurtvergelijking#woz`. Verdwijnt een sleutel toch, dan komt de opmerking
+bij import in een lijst "onderwerp bestaat niet meer" en wordt hij niet stil weggegooid.
+
+Op `file://` deelt Chrome één opslagruimte over alle lokale bestanden: twee checkouts van
+dit dashboard op dezelfde computer delen dan hun opmerkingen. Op https speelt dat niet.
+
 ## Testen
 
 Rooktest: open `index.html` (file://) en controleer de console (0 fouten verwacht).
 Headless: `msedge --headless=new --dump-dom` + `--enable-logging=stderr` toont
 console-fouten. `uvx ruff format scripts/ && uvx ruff check scripts/` en
 `node --check js/*.js` voor de code.
+
+Ankers van de reviewmodus: `DOM=<dump> node scripts/check_onderwerpen.js`. Die controleert
+dat elke `.chart-box` en `.strip` een `data-onderwerp` heeft, dat de sleutels uniek zijn en
+dat ze overeenkomen met `scripts/onderwerpen.txt`. Hernoem je bewust een kaart, werk die
+momentopname dan in dezelfde commit bij (`--schrijf`) — een verdwenen sleutel betekent dat
+opmerkingen uit eerdere rondes nergens meer op slaan.

@@ -24,6 +24,7 @@ const DATA_BESTANDEN = [
   ["cbs", "cbs_mobiliteit.js"],
   ["segmenten", "segmenten.js"],
   ["ongevallen", "ongevallen.js"],
+  ["intern", "intern.js"],
 ];
 
 function gekozenGebied() {
@@ -41,6 +42,19 @@ function gekozenGebied() {
 }
 
 const HUIDIG_GEBIED = gekozenGebied();
+
+/* Reviewmodus: uit tenzij ?review=1 in de URL staat. Bewust in de query en niet in de hash,
+   terwijl gebied= en naar= daar wél staan: bij een gebiedswissel doet js/app.js
+   `location.hash = "gebied=..."`, en dat gooit elke andere hashparameter weg. location.search
+   blijft daarbij ongemoeid, dus de vlag overleeft een gebiedswissel gratis. #...&review=1
+   werkt als tweede ingang voor wie hem verkeerd overtypt — die verdwijnt wel bij een wissel.
+
+   Dit is een standaard-uit, geen toegangsslot: wie de parameter kent ziet de laag. Er staat
+   dan ook niets in wat een gewone bezoeker niet mag zien; de opmerkingen van een reviewer
+   staan in diens eigen browser. */
+const REVIEWMODUS =
+  /(?:^|[?&])review=1(?:&|$)/.test(location.search || "") ||
+  /(?:^|[#&])review=1(?:&|$)/.test(location.hash || "");
 
 /* welke stappen bestaan voor dit gebied? Ontbrekende stappen slaan we over in plaats van
    een 404 te forceren; app.js degradeert dan netjes via zijn veilig()-guards. */
@@ -61,6 +75,10 @@ function stappenVan(code) {
      gebouwd is. Ontbreekt het bestand, dan valt de vergelijking terug op de gemeente. */
   paden.push("data/referentie.js");
   paden.push("js/app.js");
+  /* Als laatste, zodat de laag alle kaarten ziet die app.js zelf nog injecteert (de lege
+     slots uit DATA_ELEMENTEN) en alle labels die het per gebied herschrijft. Buiten
+     reviewmodus wordt het bestand niet geladen: de laag is dan afwezig, niet verborgen. */
+  if (REVIEWMODUS) paden.push("js/review.js");
 
   const ontbreekt = DATA_BESTANDEN
     .filter(([stap]) => beschikbaar && !beschikbaar.has(stap))

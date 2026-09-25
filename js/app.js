@@ -14,6 +14,26 @@ function veilig(naam, fn){
   }
 }
 
+/* Eén kerncijfervierkant, met een expliciet anker voor de reviewmodus (js/review.js).
+   De sleutel wordt hier meegegeven en niet uit het label afgeleid: labels dragen jaartallen,
+   buurtnamen en waarnemingsaantallen die per gebied verschillen, dus een afgeleide sleutel
+   zou per gebied een ander anker opleveren en historische opmerkingen laten zweven.
+   Zonder sleutel blijft het vierkant gewoon werken; het is dan alleen als onderdeel van
+   zijn strook te becommentariëren. `class="cell"` staat vooraan omdat scripts/rooktest.js
+   op die letterlijke tekst telt. */
+function sleutelbaar(tekst) {
+  return String(tekst).toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  /* é -> e, zodat de sleutel ASCII blijft */
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function tegelHtml(num, lbl, src, sleutel, stijl) {
+  return `<div class="cell"${stijl ? ` style="${stijl}"` : ""}` +
+    `${sleutel ? ` data-onderwerp="${sleutel}"` : ""}>` +
+    `<div class="num">${num}</div><div class="lbl">${lbl}</div>` +
+    `<div class="src">${src}</div></div>`;
+}
+
 /* ---------- welk gebied tonen we? ----------
    Alle gebiedsafhankelijke labels lezen hieruit, zodat er nergens meer een wijknaam of
    gemeentenaam in de code staat. GEO is de bron: die draagt sinds het gebiedsmodel de code,
@@ -32,6 +52,30 @@ const GEMEENTENAAM = (typeof GEBIEDEN !== "undefined" && GEBIEDEN.gemeente
 const GEBIEDLABEL = `${GEBIEDNAAM} (${GEBIEDNIVEAU})`;
 const TEKST = typeof tekstenVoor === "function" ? tekstenVoor(GEBIEDCODE) : {};
 const getalNL = n => n == null ? "—" : n.toLocaleString("nl-NL");
+/* GTFS telt na middernacht door: een rit om 01:10 die bij de dienstdag van gisteren hoort,
+   staat er als 25:10. Rekenen moet op die doorlopende telling — anders is het laatste vertrek
+   "vroeger" dan het eerste en klopt een bedieningsvenster niet — maar een lezer verwacht een
+   klok. Dus alleen bij het tonen terug naar 00–23; vergelijken en aftrekken blijven op de
+   ruwe tijd. */
+const klokGTFS = t => {
+  if (!t) return "";
+  const [h, m] = t.split(":");
+  return `${String(Number(h) % 24).padStart(2, "0")}:${m}`;
+};
+/* Een bediening van eerste tot laatste vertrek. Na middernacht is de kale kloktijd meestal
+   ondubbelzinnig: 05:26–00:56 leest vanzelf als "tot na middernacht". Behalve als de dienst
+   (bijna) de klok rond gaat: het nachtnet geeft 04:02–28:57, en als 04:02–04:57 leest dat als
+   een uur treindienst. Alleen dan "+1 dag" erachter. */
+const vensterGTFS = (eerste, laatste) => {
+  const van = klokGTFS(eerste), tot = klokGTFS(laatste);
+  const volgendeDag = parseInt(eerste, 10) < 24 && parseInt(laatste, 10) >= 24 && tot >= van;
+  /* nowrap op beide delen: in een smalle kolom breekt de regel dan tussen het bereik en
+     "+1 dag", niet na het streepje of midden in "+1 dag" */
+  return `<span style="white-space:nowrap">${van}–${tot}</span>` + (volgendeDag
+    ? ' <span style="white-space:nowrap;color:var(--asfalt-zacht)" title="laatste vertrek ' +
+      'valt op de volgende kalenderdag">+1 dag</span>'
+    : "");
+};
 
 /* Faal zichtbaar, niet stil: zonder Chart.js geen grafieken, maar wel uitleg. */
 if (typeof Chart === "undefined") {
@@ -46,6 +90,11 @@ if (typeof Chart === "undefined") {
 if (typeof Chart !== "undefined") {
   Chart.defaults.font.family = '"Helvetica Neue",Helvetica,Arial,sans-serif';
   Chart.defaults.color = "#3A4036";
+  /* Chart.js laat standaard de rand aan de voet van een balk weg (borderSkipped: "start").
+     Bij onze zwarte balkranden leest dat als een open bakje: "de bar is niet gesloten, er
+     mist een zwarte lijn aan de onderkant" (#107). Op één plek, zodat elke staafgrafiek het
+     krijgt, ook een nieuwe. */
+  Chart.defaults.elements.bar.borderSkipped = false;
 }
 const ASFALT="#22261F", GEEL="#E8B006", SCHIE="#2E6F8E", POLDER="#557A46", BETON="#E3E1D4";
 const GRIJS="#7A7A6C";
@@ -90,12 +139,32 @@ function referentiekandidaten() {
   }
   /* wijk of gebied: de gemeente is hier wél een zinnige buitenstaander, en het eigen rayon
      is de directe context waarin dit gebied bestuurlijk valt */
-  const eigenRayon = (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [])
-    .find(r => (r.gebieden || []).some(g => g.code === eigen));
+  const rayonLijst = typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [];
+  const eigenRayon = rayonLijst.find(r => (r.gebieden || []).some(g => g.code === eigen));
+  /* Daarnaast de andere gebieden (#106). Tot nu toe kon Overschie alleen naast Rotterdam en
+     zijn eigen rayon, terwijl de vraag in een gebiedsplan juist is hoe het zich verhoudt tot
+     Hillegersberg-Schiebroek of tot een gebied elders in de stad. referentie.js heeft alle
+     veertien gebieden al, dus dit is alleen een kwestie van ze aanbieden.
+
+     Standaard uit, ook de zusters. Drie à vier extra reeksen in elk staafdiagram maakt de
+     standaardweergave onleesbaar; wie wil vergelijken, zet ze aan. De zusters staan als vinkje
+     in de balk, de rest in een keuzelijst per rayon (`extra`). De volgorde komt uit de
+     gebiedsboom en niet uit referentie.js, zodat hij per rayon gegroepeerd is. */
+  const rayonVan = {};
+  rayonLijst.forEach(r => (r.gebieden || []).forEach(g => { rayonVan[g.code] = r; }));
+  const volgorde = rayonLijst.flatMap(r => (r.gebieden || []).map(g => g.code));
+  const gebieden = alle
+    .filter(r => r.code !== eigen && r.niveau !== "rayon" && r.niveau !== "gemeente"
+              && volgorde.includes(r.code))
+    .sort((a, b) => volgorde.indexOf(a.code) - volgorde.indexOf(b.code));
+  const zuster = r => eigenRayon && rayonVan[r.code] === eigenRayon;
   return [
     ...gemeente.map(r => ({...r, standaard: true})),
     ...rayons.filter(r => eigenRayon && r.code === eigenRayon.code)
              .map(r => ({...r, standaard: true})),
+    ...gebieden.filter(zuster).map(r => ({...r, standaard: false})),
+    ...gebieden.filter(r => !zuster(r)).map(r =>
+      ({...r, standaard: false, extra: true, rayonNaam: (rayonVan[r.code] || {}).naam || ""})),
   ];
 }
 
@@ -139,7 +208,35 @@ function peersOpNiveau(heeft = () => true, binnenEigenRayon = true) {
       : Math.max(0, (GEBIEDEN?.rayons || []).reduce((n, r) => n + (r.gebieden || []).length, 0) - 1),
   };
 }
-const refAan = new Set(REF_KANDIDATEN.filter(r => r.standaard).map(r => r.code));
+/* De keuze staat in de URL-hash (`vergelijk=`), zodat een link mét vergelijking te delen is
+   (#106). Ontbreekt de parameter, dan de standaardkeuze; staat hij er leeg, dan bewust geen
+   enkele vergelijking. Onbekende codes vallen weg: een link van een rayonpagina bevat geen
+   kandidaten voor een wijkpagina. Een gebiedswissel zet de hash op alleen `gebied=` en
+   begint dus weer met de standaard van het nieuwe niveau — terecht, want de kandidaten
+   verschillen per niveau. `typeof location`: de referentielaag draait ook in Node
+   (scripts/check_referentielaag.js), zonder browser. */
+function refUitHash() {
+  if (typeof location === "undefined") return null;
+  const m = /(?:^|[#&])vergelijk=([A-Za-z0-9_,]*)/.exec(location.hash || "");
+  return m ? m[1].split(",").filter(c => REF_KANDIDATEN.some(k => k.code === c)) : null;
+}
+const _refUitHash = refUitHash();
+const refAan = new Set(_refUitHash
+  || REF_KANDIDATEN.filter(r => r.standaard).map(r => r.code));
+/* Welke kandidaten als vinkje in beeld staan. De `extra` gebieden pas nadat ze gekozen zijn;
+   uitzetten laat het vinkje staan, zodat een misklik terug te draaien is. */
+const refGetoond = new Set(REF_KANDIDATEN.filter(r => !r.extra || refAan.has(r.code))
+  .map(r => r.code));
+function refNaarHash() {
+  if (typeof history === "undefined" || !history.replaceState) return;
+  /* replaceState en niet location.hash: die laatste springt naar een anker en voegt voor
+     elk vinkje een stap aan de browsergeschiedenis toe. De andere parameters (gebied=,
+     naar=, review=) blijven staan. */
+  const delen = (location.hash || "").replace(/^#/, "").split("&")
+    .filter(d => d && !d.startsWith("vergelijk="));
+  delen.push("vergelijk=" + [...refAan].join(","));
+  history.replaceState(null, "", "#" + delen.join("&"));
+}
 
 /* ---------- de referentiekeuze als pagina-brede instelling (#7) ----------
    De keuze stond in sectie 02 en gold voor één grafiek: de buurtvergelijking. Dat is de
@@ -165,6 +262,17 @@ function refGewijzigd() {
   refAbonnees.forEach(([naam, fn]) => veilig("referentie:" + naam, fn));
 }
 function refActief() { return REF_KANDIDATEN.filter(r => refAan.has(r.code)); }
+/* De ODiN-grafieken tekenden Rotterdam altijd, uit hun eigen uitdraai, ook als de gemeente in
+   de balk uitstond (#109). Op een rayonpagina, waar de gemeente standaard uit staat, leek de
+   grafiek daardoor de balk te negeren. Nu hangt de zichtbaarheid aan dezelfde keuze; de
+   cijfers blijven uit ODINW.*.rotterdam komen, met hun eigen n. Zonder referentielaag blijft
+   Rotterdam staan als enige buitenstaander, zoals de buurtvergelijking ook terugvalt. Op de
+   gemeentepagina zelf nooit: dat is dan het gebied zelf, twee keer. */
+function gemeenteReeksAan() {
+  if (GEBIEDNIVEAU === "gemeente") return false;
+  if (!REF_KANDIDATEN.length) return true;
+  return refAan.has(GEMEENTECODE);
+}
 
 /* Kleur per niveau — maar op rayonniveau staan er drie zusterrayons naast elkaar, en die
    kregen alle drie dezelfde paarse lijn. Drie ononderscheidbare lijnen met drie namen in de
@@ -199,11 +307,21 @@ function _hslNaarHex(h, sp, lp) {
 /* Verschuiving per positie binnen het niveau. De eerste houdt de basiskleur, zodat een
    grafiek met één referentie er precies zo uitziet als voorheen. */
 const _L_VERSCHUIVING = [0, 18, -13, 32, -22];
+/* De groep waarbinnen de tint verschuift. Tot vijf kandidaten per niveau is dat de hele groep,
+   zodat een rayon altijd dezelfde tint houdt, ook als je andere rayons aan- of uitzet. Een
+   wijkpagina heeft er sinds #106 dertien, en met vijf tinten zouden er dan twee gebieden
+   dezelfde kleur krijgen. Daar telt de positie onder de aangezette gebieden: tussen de
+   grafieken blijft de kleur gelijk, alleen een andere keuze kan hem verschuiven. */
+function _refKleurgroep(r) {
+  const zelfde = REF_KANDIDATEN.filter(k => k.niveau === r.niveau);
+  return zelfde.length > _L_VERSCHUIVING.length
+    ? zelfde.filter(k => refAan.has(k.code)) : zelfde;
+}
 function refKleurVan(r) {
   const basis = REF_KLEUR[r.niveau] || GRIJS;
-  const zelfde = REF_KANDIDATEN.filter(k => k.niveau === r.niveau);
+  const zelfde = _refKleurgroep(r);
   if (zelfde.length < 2) return basis;
-  const i = zelfde.findIndex(k => k.code === r.code);
+  const i = Math.max(0, zelfde.findIndex(k => k.code === r.code));
   const [h, sat, l] = _hexNaarHsl(basis);
   const verschoven = l + (_L_VERSCHUIVING[i % _L_VERSCHUIVING.length] || 0);
   return _hslNaarHex(h, sat, Math.min(68, Math.max(22, verschoven)));
@@ -214,7 +332,7 @@ function refKleurVan(r) {
    lijnen krijgen er een vorm bij. Dezelfde volgorde als de tinten. */
 const _STREEP = [[5, 4], [2, 3], [9, 4], [1, 3], [12, 3, 3, 3]];
 function refStreepVan(r) {
-  const zelfde = REF_KANDIDATEN.filter(k => k.niveau === r.niveau);
+  const zelfde = _refKleurgroep(r);
   const i = Math.max(0, zelfde.findIndex(k => k.code === r.code));
   return _STREEP[i % _STREEP.length];
 }
@@ -329,13 +447,28 @@ function bouwRefKeuze(el) {
       "bevat dit rayon zelf voor ruwweg een kwart, dus die vergelijking zegt minder."
     : GEBIEDNIVEAU === "gemeente"
       ? "De vier rayons als interne verdeling van de gemeente."
-      : "Vergelijk met de gemeente en met het rayon waar dit gebied onder valt.";
+      : "Vergelijk met de gemeente, met het rayon waar dit gebied onder valt, of met andere " +
+        "gebieden — die staan standaard uit, anders wordt elke grafiek een woud van balken.";
+  const vinkjes = REF_KANDIDATEN.filter(r => refGetoond.has(r.code));
+  /* De rest als keuzelijst, per rayon gegroepeerd: dertien vinkjes passen niet in een balk
+     die op een telefoon al twee regels beslaat. */
+  const nogTeKiezen = REF_KANDIDATEN.filter(r => r.extra && !refGetoond.has(r.code));
+  const groepen = [...new Set(nogTeKiezen.map(r => r.rayonNaam))];
+  const keuzelijst = nogTeKiezen.length
+    ? '<select data-refextra aria-label="Vergelijk met een ander gebied">' +
+      '<option value="">+ ander gebied…</option>' +
+      groepen.map(g => `<optgroup label="${g}">` +
+        nogTeKiezen.filter(r => r.rayonNaam === g)
+          .map(r => `<option value="${r.code}">${r.naam}</option>`).join("") +
+        "</optgroup>").join("") +
+      "</select>"
+    : "";
   el.innerHTML =
     (compact
       ? '<label style="margin-right:2px">Vergelijk met</label>'
       : `<span style="color:var(--asfalt-zacht)">${uitleg} Geldt voor alle grafieken op ` +
         "deze pagina.</span><br>") +
-    REF_KANDIDATEN.map(r =>
+    vinkjes.map(r =>
       '<label style="cursor:pointer;margin-right:12px;white-space:nowrap">' +
       `<input type="checkbox" data-ref="${r.code}"${refAan.has(r.code) ? " checked" : ""}> ` +
       /* In de donkere balk is de reekskleur zelf niet leesbaar als tekstkleur — SCHIE op
@@ -344,31 +477,196 @@ function bouwRefKeuze(el) {
       (compact
         ? `<span class="stip" style="background:${refKleurVan(r)}"></span>${r.naam}`
         : `<span style="color:${refKleurVan(r)}">${r.naam}</span>`) +
-      "</label>").join("");
+      "</label>").join("") + keuzelijst;
   el.querySelectorAll("input[data-ref]").forEach(cb => {
     cb.addEventListener("change", () => {
       if (cb.checked) refAan.add(cb.dataset.ref); else refAan.delete(cb.dataset.ref);
-      /* De andere bedieningen tonen dezelfde toestand; anders staat de balk bovenaan iets
-         anders aan dan het blok in sectie 02 en is niet meer te zien wat er getekend is. */
-      document.querySelectorAll(`input[data-ref="${cb.dataset.ref}"]`)
-        .forEach(a => { a.checked = cb.checked; });
-      refGewijzigd();
+      refKeuzeToegepast();
     });
+  });
+  const lijst = el.querySelector("select[data-refextra]");
+  if (lijst) lijst.addEventListener("change", () => {
+    if (!lijst.value) return;
+    refAan.add(lijst.value);
+    refGetoond.add(lijst.value);
+    refKeuzeToegepast();
   });
 }
 
-
-/* gedeelde kaartondergrond: CartoDB Positron (licht, laat dataoverlays spreken) */
-function basiskaart(){
-  return L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-    {maxZoom:19, subdomains:"abcd",
-     attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-bijdragers © <a href="https://carto.com/attributions">CARTO</a>'});
+/* Na elke wijziging alle bedieningen opnieuw opbouwen, niet alleen het ene vinkje bijzetten.
+   De andere bedieningen moeten dezelfde toestand tonen — anders staat de balk bovenaan iets
+   anders aan dan het blok in sectie 02 — en op een wijkpagina kan een keuze de kleur van de
+   andere gebieden verschuiven (zie _refKleurgroep), dus de stippen moeten mee. */
+function refKeuzeToegepast() {
+  document.querySelectorAll("[data-refkeuze]").forEach(bouwRefKeuze);
+  refNaarHash();
+  refGewijzigd();
 }
+
+
+/* gedeelde kaartondergrond: PDOK BRT Achtergrondkaart, grijze variant (#91).
+   CARTO levert zijn tegels niet meer zonder API-sleutel, en een sleutel kan in dit dashboard
+   nergens veilig staan: het opent via file://, dus zonder domein om hem aan te binden, en een
+   gecommitte sleutel is een publieke sleutel. PDOK vraagt geen sleutel en levert al de
+   CBS-kaartlagen. Grijs en niet standaard: de ondergrond moet zwijgen zodat de dataoverlays
+   spreken — dat was ook de reden voor Positron. De tegels staan in EPSG:3857, Leaflets
+   standaardprojectie, dus een gewone tileLayer volstaat. */
+/* Waar een registry-element (leeg slot, verkenner) komt. Sinds #112 mag `sectie` een
+   subsectie zijn ("s5-ov"). Bestaat die niet — een oudere index.js tegen een nieuwere pagina of
+   andersom — dan de sectie zelf ("s5"), zodat het element er nog staat, alleen minder precies. */
+function plekVoor(sectie) {
+  return document.getElementById(sectie)
+    || document.getElementById(String(sectie || "").split("-")[0]);
+}
+
+function basiskaart(){
+  return L.tileLayer(
+    "https://service.pdok.nl/brt/achtergrondkaart/wmts/v2_0/grijs/EPSG:3857/{z}/{x}/{y}.png",
+    {maxZoom:19,
+     attribution:'Kaartgegevens © <a href="https://www.kadaster.nl">Kadaster</a>'});
+}
+
+/* ---------- elke kaart schermvullend (#110) ----------
+   "Ik wil dat je alle kaarten kan vergroten op het scherm." De kaarten zijn 300 à 400 px hoog,
+   en voor een rayon met negentien buurten of de gemeente met 92 is dat te klein om te lezen.
+
+   Via een init-hook op L.Map en niet per kaart: dan krijgt elke kaart de knop, ook een die
+   later bijkomt, en de rooktest telt of dat klopt (knoppen = kaarten). Schermvullend gaat
+   het blok om de kaart heen (de chart-box), niet de kaart alleen: legenda, laagkiezer en
+   bronregel horen erbij, anders is de vergrote kaart een plaatje zonder uitleg.
+
+   De Fullscreen API werkt ook onder file://. Waar hij ontbreekt (Safari op een iPhone kent
+   hem niet voor gewone elementen) valt het terug op een CSS-klasse die het blok over het
+   scherm legt; Escape sluit beide. Geen plugin: voor één knop is dat een dependency te veel. */
+function kaartBlok(map) {
+  const c = map.getContainer();
+  return c.closest(".chart-box") || c.parentElement;
+}
+function kaartVolledig(map, aan) {
+  const blok = kaartBlok(map);
+  const c = map.getContainer();
+  const api = blok.requestFullscreen && document.fullscreenEnabled !== false;
+  if (aan) {
+    blok.classList.add("kaart-vol");
+    c.classList.add("kaart-vol-kaart");
+    if (api) blok.requestFullscreen().catch(() => blok.classList.add("kaart-vol-css"));
+    else blok.classList.add("kaart-vol-css");
+  } else {
+    if (document.fullscreenElement === blok) document.exitFullscreen();
+    blok.classList.remove("kaart-vol", "kaart-vol-css");
+    c.classList.remove("kaart-vol-kaart");
+  }
+  map._kaartVol = aan;
+  const knop = c.querySelector(".kaart-vergroot a");
+  if (knop) {
+    knop.textContent = aan ? "×" : "⤢";
+    knop.title = aan ? "Verkleinen (Esc)" : "Kaart vergroten";
+    knop.setAttribute("aria-label", knop.title);
+  }
+  /* Leaflet meet zijn container bij het aanmaken; na een maatwissel moet hij opnieuw meten,
+     anders blijven de tegels in het oude kader staan. */
+  setTimeout(() => map.invalidateSize(), 150);
+}
+if (typeof L !== "undefined") {
+  const VergrootKnop = L.Control.extend({
+    options: {position: "topleft"},
+    onAdd(map) {
+      const div = L.DomUtil.create("div", "leaflet-bar kaart-vergroot");
+      const a = L.DomUtil.create("a", "", div);
+      a.href = "#"; a.role = "button"; a.textContent = "⤢";
+      a.title = "Kaart vergroten"; a.setAttribute("aria-label", a.title);
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.on(a, "click", e => {
+        L.DomEvent.preventDefault(e);
+        kaartVolledig(map, !map._kaartVol);
+      });
+      /* Esc of de browserknop sluit de echte fullscreen buiten ons om: dan de klassen en de
+         knop ook terugzetten. */
+      document.addEventListener("fullscreenchange", () => {
+        if (map._kaartVol && document.fullscreenElement !== kaartBlok(map)
+            && !kaartBlok(map).classList.contains("kaart-vol-css")) kaartVolledig(map, false);
+      });
+      document.addEventListener("keydown", e => {
+        if (e.key === "Escape" && map._kaartVol) kaartVolledig(map, false);
+      });
+      return div;
+    },
+  });
+  L.Map.addInitHook(function () { this.addControl(new VergrootKnop()); });
+
+  /* ---------- een kaart in een verborgen blok opent niet meer op zoom 19 (#131) ----------
+     Drie keer dezelfde fout (lagenkaart #115, autobezit, parkeren): het blok staat nog op
+     `hidden` als de kaart zich aan het gebied aanpast. De kaart is dan 0 × 0 px, fitBounds
+     komt uit op de maximale zoom, en een losse invalidateSize() erna maakt hem niet opnieuw
+     passend. Per blok repareren vergeet je bij het volgende blok; daarom hier, voor elke kaart:
+     de laatste fitBounds onthouden, en zodra de container van nul naar een echte maat gaat
+     opnieuw meten en opnieuw passend maken.
+
+     En de zoom op de container (data-zoom), zodat de rooktest een kaart kan afkeuren die na
+     het laden op zoom 18 of dieper staat — dat is een paar straten, geen gebied. */
+  L.Map.addInitHook(function () {
+    const map = this, c = map.getContainer();
+    const fit = map.fitBounds;
+    map.fitBounds = function (bounds, opties) {
+      map._laatstePassing = [bounds, opties];
+      return fit.call(map, bounds, opties);
+    };
+    const zetZoom = () => { c.dataset.zoom = String(map.getZoom()); };
+    map.on("zoomend load viewreset", zetZoom);
+    if (typeof ResizeObserver === "undefined") return;
+    let wasLeeg = !c.clientWidth || !c.clientHeight;
+    new ResizeObserver(() => {
+      const leeg = !c.clientWidth || !c.clientHeight;
+      if (wasLeeg && !leeg) {
+        map.invalidateSize();
+        if (map._laatstePassing) fit.call(map, ...map._laatstePassing);
+        zetZoom();
+      }
+      wasLeeg = leeg;
+    }).observe(c);
+  });
+}
+/* ---------- #30: toetsen aan een norm ----------
+   Kleuren op basis van een norm is interpretatie, en dit dashboard houdt interpretatie in het
+   duidingsblok. Na overleg met de opdrachtgever geldt daarom: alleen een wettelijke of
+   vastgestelde norm, nooit het gemeentegemiddelde — bij elke indicator ligt de helft van de
+   gebieden daaronder, en dan kleurt de helft rood zonder dat er een opgave is.
+
+   Daarom staat dit alleen bij luchtkwaliteit: dat is de enige indicator in dit dashboard met
+   een harde grenswaarde. Op WOZ, inkomen en armoede komt geen norm; de registry legt uit
+   waarom. Geluid volgt met #19.
+
+   Geen kleur alleen: bij de markering staat altijd de norm, het soort en het peiljaar in
+   tekst. Rood/groen zonder woorden sluit kleurenblinde lezers uit, en een kleur zonder norm
+   is een oordeel zonder onderbouwing. */
+function normtoets(sleutel, waarde) {
+  const normen = (typeof GEBIEDEN !== "undefined" && GEBIEDEN.normen) || {};
+  const lijst = normen[sleutel];
+  if (!lijst || !lijst.length || typeof waarde !== "number" || !isFinite(waarde)) return "";
+  const regels = lijst.map(n => {
+    const over = n.richting === "boven" ? waarde > n.waarde : waarde < n.waarde;
+    /* Woorden vóór de kleur, en het teken erbij: "boven" en "onder" staan er letterlijk. */
+    const kleur = over ? "var(--rood)" : "var(--polder)";
+    const teken = over ? "boven" : "onder";
+    const soort = n.soort === "wettelijk" ? "wettelijke grenswaarde" : "advieswaarde";
+    return `<span style="color:${kleur};font-weight:700">${over ? "▲" : "▼"} ${teken}</span>` +
+      ` de ${soort} van ${n.waarde.toLocaleString("nl-NL")} ${n.eenheid}` +
+      `<span style="color:#7a7a6c"> (${n.naam}, ${n.bron}, ${n.peiljaar})</span>`;
+  });
+  return "<br>" + regels.join("<br>");
+}
+
 function pctTip(unit){ return {callbacks:{label:c=>` ${c.parsed.y ?? c.parsed.x ?? c.parsed}${unit}`}}; }
 
 /* gedeeld over blokken heen */
-let chBuurtObj=null, toonIndicator=null, updateKaart=null, initKaart=null, wijkLijn=null;
+let chBuurtObj=null, toonIndicator=null, updateKaart=null, initKaart=null, wijkLijn=null,
+    bereikKappen=null;
 let kaart=null, buurtLaag=null, wmsLaag=null, laatsteKey="inkomen";
+/* De gevonden PDOK-jaargang van de CBS 100 m-laag, gedeeld met de lagenkaart (#115). Die las
+   `wmsJaar`, maar dat staat met let binnen veilig("kaart") en is daarbuiten niet zichtbaar:
+   typeof gaf altijd "undefined", en de laag meldde altijd "jaargang nog niet gevonden".
+   {jaar, url(stijl)} zodra de zoektocht klaar is; null zolang hij loopt of mislukt. */
+let cbsWms = null;
 
 /* ---------- verrijking uit gegenereerde CBS-data (js/cbs_mobiliteit.js) ----------
    Vervangt de afgeleide RDW-schatting door officiële KWB-cijfers en voegt de
@@ -512,25 +810,27 @@ if (!strip || typeof PROFIEL === "undefined") return;
 const k = PROFIEL.kerncijfers || {};
 const groei = PROFIEL.groei || {labels: [], values: []};
 const cellen = [];
-const cel = (num, lbl, src) => cellen.push(
-  `<div class="cell"><div class="num">${num}</div><div class="lbl">${lbl}</div>` +
-  `<div class="src">${src}</div></div>`);
+const cel = (num, lbl, src, sleutel) =>
+  cellen.push(tegelHtml(num, lbl, src, `kerncijfers/${sleutel}`));
 
-if (k.inwoners != null) cel(getalNL(k.inwoners), `inwoners`, `CBS KWB ${k.peiljaar ?? ""}`);
+if (k.inwoners != null)
+  cel(getalNL(k.inwoners), `inwoners`, `CBS KWB ${k.peiljaar ?? ""}`, "inwoners");
 if (groei.values.length > 1) {
   const eerste = groei.values[0], laatst = groei.values.at(-1);
   const pct = Math.round(100 * (laatst / eerste - 1));
   cel(`${pct >= 0 ? "+" : ""}${pct}%`,
-    `bevolkingsgroei ${groei.labels[0]}–${groei.labels.at(-1)}`, "CBS KWB");
+    `bevolkingsgroei ${groei.labels[0]}–${groei.labels.at(-1)}`, "CBS KWB", "groei");
 }
 if (k.oppervlakteLandKm2 != null)
-  cel(`${k.oppervlakteLandKm2.toLocaleString("nl-NL")} km²`, "landoppervlak", "CBS/PDOK");
+  cel(`${k.oppervlakteLandKm2.toLocaleString("nl-NL")} km²`, "landoppervlak", "CBS/PDOK",
+      "landoppervlak");
 if (k.huishoudens != null)
-  cel(getalNL(k.huishoudens), "huishoudens", `CBS KWB ${k.peiljaar ?? ""}`);
+  cel(getalNL(k.huishoudens), "huishoudens", `CBS KWB ${k.peiljaar ?? ""}`, "huishoudens");
 const trein = (typeof CBSMOB !== "undefined" && CBSMOB.nabijheid && CBSMOB.nabijheid.gebied)
   ? CBSMOB.nabijheid.gebied.trein : null;
 if (trein != null)
-  cel(`${trein.toLocaleString("nl-NL")} km`, "gem. afstand tot treinstation", "CBS nabijheid");
+  cel(`${trein.toLocaleString("nl-NL")} km`, "gem. afstand tot treinstation", "CBS nabijheid",
+      "afstand-trein");
 /* Zelfvoorzienendheid hoort bij de kerncijfers, niet als bijschrift onder een kaart in
    sectie 07 (#49). Voor een rayon is dit het cijfer dat zegt of het gebied zijn eigen
    verplaatsingen bevat — een beleidsvraag, geen mobiliteitsdetail. */
@@ -541,7 +841,7 @@ const zelf = (zelfDeel.n != null && zelfDeel.n < ((ODINW.drempel && ODINW.drempe
   ? null : zelfDeel.share ?? null;
 if (zelf != null)
   cel(`${zelf.toLocaleString("nl-NL")}%`, "verplaatsingen blijven binnen het gebied",
-      "ODiN (steekproef)");
+      "ODiN (steekproef)", "zelfvoorzienendheid");
 /* Bij een gebied van meerdere wijken is een gemiddelde een rekenkundig artefact: de
    WOZ-waarde van dit rayon is 404 terwijl de buurten van 250 tot 779 lopen. Daarom bij
    meerdere wijken de spreiding erbij, en niet alleen het middelpunt. */
@@ -552,16 +852,151 @@ if (woz && woz.wijk != null) {
     ? ` (buurten € ${Math.round(Math.min(...wozBuurten))}k–${Math.round(Math.max(...wozBuurten))}k)`
     : "";
   cel(`€ ${Math.round(woz.wijk)}k`, "gemiddelde WOZ-waarde" + meer,
-    `CBS KWB ${woz.peiljaar ?? ""}`);
+    `CBS KWB ${woz.peiljaar ?? ""}`, "woz");
 }
 /* Geen enkele tegel: een gebied zonder inwoners, huishoudens of woningen — de haven-,
    bedrijven- en watergebieden. CBS publiceert daar niets, en dat hoort er te staan in plaats
    van een lege strook (#38). */
 strip.innerHTML = cellen.length
   ? cellen.join("")
-  : '<div class="cell"><div class="num">—</div><div class="lbl">CBS publiceert voor dit ' +
-    'gebied geen kerncijfers; het heeft geen of vrijwel geen inwoners</div>' +
-    `<div class="src">CBS KWB ${k.peiljaar ?? ""}</div></div>`;
+  : tegelHtml("—", "CBS publiceert voor dit gebied geen kerncijfers; het heeft geen of " +
+      "vrijwel geen inwoners", `CBS KWB ${k.peiljaar ?? ""}`, "kerncijfers/leeg");
+});
+
+veilig("overzichtskaart", () => {
+/* ---------- #111: waar ligt het gebied en wat zit erin? ----------
+   Review Kevin: "Goed om ook een kaart te laten zien van het gebied dat geselecteerd is, met
+   inzicht in de gebieden/buurten erin en wat de grenzen daar zijn. Handig als de naam van de
+   buurten op de kaart te zien is zonder erop te klikken." De eerste kaart stond pas in sectie
+   02, als datakaart, en daar zie je een naam alleen na een klik.
+
+   Dit is een oriëntatiekaart, geen datakaart: de vlakken krijgen een neutrale kleur per
+   eenheid (gebied bij een rayon, rayon bij de gemeente), geen kleur die iets meet (#30).
+
+   Een aparte gebiedsgrens staat niet in geo.js. De buurtcode draagt de wijk
+   (BU0599·04·51 hoort bij WK0599·04), dus de indeling is af te leiden; de grens tussen twee
+   gebieden is de rand waar de kleur wisselt. Een echte samengevoegde grens is een
+   pipelinewijziging en een vervolgstap. */
+if (typeof GEO === "undefined" || typeof L === "undefined" || !GEO.features?.length) return;
+const box = document.getElementById("overzichtBox");
+if (!box) return;
+
+const wijkVan = code => "WK" + code.slice(2, 8);
+const rayons = typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : [];
+const naamVan = {}, rayonVan = {};
+rayons.forEach(r => (r.gebieden || []).forEach(g => { naamVan[g.code] = g.naam; rayonVan[g.code] = r; }));
+(typeof GEBIEDEN !== "undefined" ? GEBIEDEN.buitenGebiedsindeling?.gebieden || [] : [])
+  .forEach(g => { naamVan[g.code] = g.naam; });
+
+/* Waarop kleuren we? Bij een wijk is er één eenheid; dan zegt kleur niets en blijft alles
+   hetzelfde. Bij een rayon de gebieden; bij de gemeente de rayons, met de haven- en
+   bedrijvengebieden apart, want die horen bij geen rayon. */
+const eenheidVan = f => {
+  const w = wijkVan(f.properties.code);
+  if (GEBIEDNIVEAU === "gemeente") return rayonVan[w] ? rayonVan[w].naam : "buiten de rayonindeling";
+  return naamVan[w] || w;
+};
+const PALET = ["#C9D6C1", "#D9CBB0", "#C3CFDA", "#D8C4CF", "#CFCFB8", "#BFD3D0"];
+const eenheden = [...new Set(GEO.features.map(eenheidVan))];
+const kleurVan = e => e === "buiten de rayonindeling" ? "#E3E1D4"
+  : PALET[eenheden.filter(x => x !== "buiten de rayonindeling").indexOf(e) % PALET.length];
+
+/* Eerst zichtbaar, dan de kaart: Leaflet meet zijn container bij het aanmaken, en een
+   verborgen blok meet nul. */
+box.hidden = false;
+/* zoomSnap in kwarten: met hele zoomstappen past een rayon net niet op niveau 12 en valt hij
+   terug naar 11, en dan is het gebied een postzegel in een leeg kader. */
+const k = L.map("kaartOverzicht", {scrollWheelZoom: false, zoomSnap: .25});
+basiskaart().addTo(k);
+const laag = L.geoJSON({type: "FeatureCollection", features: GEO.features}, {
+  style: f => ({color: ASFALT, weight: 1, fillColor: kleurVan(eenheidVan(f)), fillOpacity: .6}),
+  onEachFeature: (f, l) => l.bindPopup(`<b>${f.properties.naam}</b><br>` +
+    `${naamVan[wijkVan(f.properties.code)] || ""}` +
+    (f.properties.inwoners != null
+      ? `<br>${f.properties.inwoners.toLocaleString("nl-NL")} inwoners` : "")),
+}).addTo(k);
+k.fitBounds(laag.getBounds(), {padding: [10, 10]});
+
+/* Buurtnamen altijd bij een wijk of rayon (6 à 19 labels). Bij de gemeente zijn het er 92:
+   dan eerst de gebiedsnamen, en de buurtnamen pas vanaf een zoomniveau waarop ze uit elkaar
+   liggen. Een label staat op de centroïde uit geo.js, dezelfde als elders in het dashboard. */
+const buurtTips = GEO.features
+  .filter(f => Array.isArray(f.properties.centroid))
+  .map(f => Object.assign(L.tooltip({permanent: true, direction: "center",
+                                     className: "kaartlabel", interactive: false})
+    .setLatLng(f.properties.centroid).setContent(f.properties.naam),
+    {_prio: f.properties.inwoners || 0}));
+const buurtLabels = L.layerGroup(buurtTips);
+const perGebied = {};
+GEO.features.forEach(f => {
+  const w = wijkVan(f.properties.code), c = f.properties.centroid;
+  if (!Array.isArray(c)) return;
+  (perGebied[w] = perGebied[w] || []).push([c, f.properties.inwoners || 1]);
+});
+/* Gebiedslabel op het inwonersgewogen midden van zijn buurten: bij een gebied met een lege
+   polder aan de rand valt de naam dan in het bewoonde deel, waar de lezer hem zoekt. */
+/* Bij de gemeente alleen de veertien gebieden uit de rayonindeling: de haven- en
+   bedrijvengebieden liggen midden tussen de woongebieden en hun namen dekten die af. Ze staan
+   wel in de legenda en in de popup. */
+const gebiedTips = Object.entries(perGebied)
+  .filter(([w]) => naamVan[w] && (GEBIEDNIVEAU !== "gemeente" || rayonVan[w]))
+  .map(([w, punten]) => {
+    const tot = punten.reduce((s, [, n]) => s + n, 0);
+    const lat = punten.reduce((s, [c, n]) => s + c[0] * n, 0) / tot;
+    const lon = punten.reduce((s, [c, n]) => s + c[1] * n, 0) / tot;
+    return Object.assign(L.tooltip({permanent: true, direction: "center",
+                                    className: "kaartlabel gebied", interactive: false})
+      .setLatLng([lat, lon]).setContent(naamVan[w]), {_prio: 1e9 + tot});
+  });
+const gebiedLabels = L.layerGroup(gebiedTips);
+/* Leaflet kent geen botsingsdetectie voor labels. Zonder dat liepen bij een rayon de namen
+   van kleine buurten door elkaar. Daarom na elke zoom: in volgorde van belang (gebieden voor
+   buurten, grote buurten voor kleine) tonen, en een label dat een al getoond label raakt
+   verbergen. Wat verborgen is, komt terug bij verder inzoomen. */
+const ontwar = () => {
+  const getoond = [];
+  [...gebiedTips, ...buurtTips]
+    .filter(t => k.hasLayer(t) || (t._map && t.getElement()))
+    .sort((a, b) => b._prio - a._prio)
+    .forEach(t => {
+      const el = t.getElement();
+      if (!el) return;
+      el.style.visibility = "visible";
+      const r = el.getBoundingClientRect();
+      const raakt = getoond.some(o => r.left < o.right && r.right > o.left &&
+                                      r.top < o.bottom && r.bottom > o.top);
+      if (raakt) el.style.visibility = "hidden"; else getoond.push(r);
+    });
+};
+const veelBuurten = GEO.features.length > 30;
+const labelsBijwerken = () => {
+  const z = k.getZoom();
+  const buurtAan = !veelBuurten || z >= 13;
+  /* Bij een rayon staan de gebieden al in de legenda en als kleur; hun namen over de
+     buurtnamen heen maakten die onleesbaar. Pas uitgezoomd (onder 11) nemen ze het over. */
+  const gebiedAan = GEBIEDNIVEAU === "gemeente" ? z < 13
+    : GEBIEDNIVEAU === "rayon" ? z < 11 : false;
+  if (buurtAan) buurtLabels.addTo(k); else k.removeLayer(buurtLabels);
+  if (gebiedAan) gebiedLabels.addTo(k); else k.removeLayer(gebiedLabels);
+  requestAnimationFrame(ontwar);
+};
+k.on("zoomend", labelsBijwerken);
+labelsBijwerken();
+
+const legenda = eenheden.length > 1
+  ? " " + eenheden.map(e => `<span style="display:inline-block;width:12px;height:12px;` +
+      `background:${kleurVan(e)};border:1px solid ${ASFALT};vertical-align:-2px"></span> ${e}`)
+      .join(" &nbsp; ")
+  : "";
+document.getElementById("overzichtSub").innerHTML =
+  `${GEO.features.length} buurt${GEO.features.length === 1 ? "" : "en"} in ${GEBIEDNAAM}` +
+  (GEBIEDNIVEAU === "gemeente"
+    ? `, gekleurd per rayon.${veelBuurten ? " Zoom in voor de buurtnamen." : ""}`
+    : GEBIEDNIVEAU === "rayon" ? ", gekleurd per gebied." : ".") +
+  (legenda ? `<br>${legenda}` : "");
+document.getElementById("overzichtFoot").textContent =
+  `Buurtgrenzen: ${GEO.bron}. Kleur geeft alleen de indeling aan, geen waarde. Klik op een ` +
+  "buurt voor naam en inwonertal.";
 });
 
 veilig("sectieteksten", () => {
@@ -571,10 +1006,18 @@ const zet = (id, waarde) => {
   if (el && waarde) el.innerHTML = waarde;
 };
 const buurten = (typeof GEO !== "undefined" && GEO.features) ? GEO.features.length : 0;
-zet("gebiedKop", TEKST.gebiedKop || (buurten ? `${buurten} buurten` : "Het gebied"));
-zet("gebiedIntro", TEKST.gebiedIntro || (
-  `Alle ${buurten} buurten binnen ${GEBIEDNAAM}, met de cijfers per buurt. ` +
-  "Klik op een buurt voor de details."));
+/* Bij een rayon en de gemeente opent de sectie met de gebieden (#135), dus de kop ook. */
+const gebiedenAantal = (typeof GEO !== "undefined" && GEO.features)
+  ? new Set(GEO.features.map(f => String(f.properties.code).slice(2, 8))).size : 0;
+const perGebied = (GEBIEDNIVEAU === "rayon" || GEBIEDNIVEAU === "gemeente") && gebiedenAantal > 1;
+zet("gebiedKop", TEKST.gebiedKop || (perGebied
+  ? `${gebiedenAantal} gebieden, ${buurten} buurten`
+  : buurten ? `${buurten} buurten` : "Het gebied"));
+zet("gebiedIntro", TEKST.gebiedIntro || (perGebied
+  ? `${GEBIEDNAAM} bestaat uit ${gebiedenAantal} gebieden. Klik op een gebied voor een kort ` +
+    "overzicht en zijn buurten, of ga door naar de gebiedspagina."
+  : `Alle ${buurten} buurten binnen ${GEBIEDNAAM}, met de cijfers per buurt. ` +
+    "Klik op een buurt voor de details."));
 const groei = (typeof PROFIEL !== "undefined" && PROFIEL.groei) || null;
 zet("bevolkingKop", TEKST.bevolkingKop || "Bevolkingsontwikkeling");
 zet("bevolkingIntro", TEKST.bevolkingIntro || (groei && groei.values.length > 1
@@ -651,33 +1094,33 @@ if (vIntro) {
 const sStrip = document.getElementById("spreidingStrip");
 if (sStrip) {
   const tegels = [];
-  const tegel = (num, lbl, src) => tegels.push(
-    `<div class="cell"><div class="num">${num}</div><div class="lbl">${lbl}</div>` +
-    `<div class="src">${src}</div></div>`);
+  const tegel = (num, lbl, src, sleutel) =>
+    tegels.push(tegelHtml(num, lbl, src, `spreiding/${sleutel}`));
   const bron = `CBS KWB ${D.buurtVergelijk?.indicatoren?.woz?.peiljaar ?? ""}`;
   const ink = uitersten("inkomen");
   if (ink && ink.factor)
     tegel(`${ink.factor.toFixed(1)}×`,
-      `inkomensverschil hoogste vs. laagste buurt (${ink.hoog.naam} vs. ${ink.laag.naam})`, bron);
+      `inkomensverschil hoogste vs. laagste buurt (${ink.hoog.naam} vs. ${ink.laag.naam})`,
+      bron, "inkomen");
   const woz = uitersten("woz");
   if (woz && woz.factor)
     tegel(`${woz.factor.toFixed(1)}×`,
-      `verschil in woningwaarde (${woz.hoog.naam} vs. ${woz.laag.naam})`, bron);
+      `verschil in woningwaarde (${woz.hoog.naam} vs. ${woz.laag.naam})`, bron, "woz");
   const autos = uitersten("autos");
   if (autos)
     tegel(`${autos.hoog.v.toLocaleString("nl-NL")} vs ${autos.laag.v.toLocaleString("nl-NL")}`,
-      `auto's per huishouden: ${autos.hoog.naam} vs. ${autos.laag.naam}`, bron);
+      `auto's per huishouden: ${autos.hoog.naam} vs. ${autos.laag.naam}`, bron, "autos");
   const arm = uitersten("armoede");
   if (arm)
     tegel(`${arm.hoog.v.toLocaleString("nl-NL")}% vs ${arm.laag.v.toLocaleString("nl-NL")}%`,
-      `personen in armoede: ${arm.hoog.naam} vs. ${arm.laag.naam}`, bron);
+      `personen in armoede: ${arm.hoog.naam} vs. ${arm.laag.naam}`, bron, "armoede");
   /* Geen enkele tegel: te weinig buurten met gepubliceerde waarden om een uiterste te
      bepalen — dat gebeurt bij een klein of onbewoond gebied. Dan hoort er te staan dat er
      niets te vergelijken valt, niet een lege strook. */
   sStrip.innerHTML = tegels.length
     ? tegels.join("")
-    : '<div class="cell"><div class="num">—</div><div class="lbl">te weinig buurten met ' +
-      'gepubliceerde cijfers om spreiding te tonen</div><div class="src">' + bron + "</div></div>";
+    : tegelHtml("—", "te weinig buurten met gepubliceerde cijfers om spreiding te tonen",
+        bron, "spreiding/leeg");
 }
 
 /* Sectie 05 Wonen: stond volledig hardgecodeerd op Overschie (8.924 woningen, € 364.000).
@@ -690,23 +1133,24 @@ if (wonenStrip) {
   const woz = D.buurtVergelijk?.indicatoren?.woz;
   const wozWaarden = (woz?.values || []).filter(v => typeof v === "number");
   const cellen = [];
-  const cel = (num, lbl, src, gepland) => cellen.push(
-    `<div class="cell"${gepland ? ' style="opacity:.55"' : ""}>` +
-    `<div class="num">${num}</div><div class="lbl">${lbl}</div>` +
-    `<div class="src">${src}</div></div>`);
+  const cel = (num, lbl, src, sleutel, gepland) => cellen.push(
+    tegelHtml(num, lbl, src, `wonen-kerncijfers/${sleutel}`,
+      gepland ? "opacity:.55" : null));
 
   if (k.woningen != null)
-    cel(getalNL(k.woningen), "woningen", `CBS KWB ${k.peiljaar ?? ""}`);
+    cel(getalNL(k.woningen), "woningen", `CBS KWB ${k.peiljaar ?? ""}`, "woningen");
   if (woz && woz.wijk != null)
-    cel(`€ ${Math.round(woz.wijk)}k`, "gemiddelde WOZ-waarde", `CBS KWB ${woz.peiljaar ?? ""}`);
+    cel(`€ ${Math.round(woz.wijk)}k`, "gemiddelde WOZ-waarde", `CBS KWB ${woz.peiljaar ?? ""}`,
+      "woz");
   /* Spreiding is bij een rayon belangrijker dan het gemiddelde: zie de intro hieronder. */
   if (wozWaarden.length > 1) {
     const min = Math.min(...wozWaarden), max = Math.max(...wozWaarden);
     cel(`€ ${Math.round(min)}k–${Math.round(max)}k`, "WOZ-spreiding tussen buurten",
-      `CBS KWB ${woz.peiljaar ?? ""}`);
+      `CBS KWB ${woz.peiljaar ?? ""}`, "woz-spreiding");
   }
-  cel("—", "energielabels", "geen bron in deze pipeline (RVO)", true);
-  cel("—", "gasverbruik per woning", "geen bron in deze pipeline (CBS/netbeheer)", true);
+  cel("—", "energielabels", "geen bron in deze pipeline (RVO)", "energielabels", true);
+  cel("—", "gasverbruik per woning", "geen bron in deze pipeline (CBS/netbeheer)",
+    "gasverbruik", true);
   wonenStrip.innerHTML = cellen.join("");
 
   const intro = document.getElementById("wonenIntro");
@@ -945,7 +1389,7 @@ const g = new Chart(chLeeftijd, {type:"bar",
   options:{indexAxis:"y", maintainAspectRatio:false,
     plugins:{legend:{display:false, position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${c.parsed.x}%`}}},
-    scales:{x:{grid:gridOpt, max:32, ticks:{callback:v=>v+"%"}}, y:{grid:{display:false}}}}});
+    scales:{x:{grid:gridOpt, beginAtZero:true, max:32, ticks:{callback:v=>v+"%"}}, y:{grid:{display:false}}}}});
 /* De vaste bovengrens van 32% was op Overschie geijkt. Zodra er een referentiegebied naast
    staat kan die overschreden worden, en een balk die tegen de rand aan stopt liegt over zijn
    lengte. Daarom rekt de as mee met wat er werkelijk getekend wordt. */
@@ -1007,7 +1451,7 @@ let chInkomenObj = new Chart(chInkomen, {type:"bar",
   }]},
   options:{maintainAspectRatio:false, plugins:{legend:{display:false},
     tooltip:{callbacks:{label:c=>` € ${(c.parsed.y*1000).toLocaleString("nl-NL")}`}}},
-    scales:{y:{grid:gridOpt, title:{display:true,text:"× € 1.000"}}, x:{grid:{display:false}}}}});
+    scales:{y:{grid:gridOpt, beginAtZero:true, title:{display:true,text:"× € 1.000"}}, x:{grid:{display:false}}}}});
 function toonInkomen(maat) {
   const d = D.inkomen[maat];
   const ref = refWaarden(`inkomen.${maat}`);
@@ -1038,7 +1482,7 @@ const g = new Chart(chOpleiding, {type:"bar",
   options:{maintainAspectRatio:false,
     plugins:{legend:{display:false, position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${c.parsed.y}%`}}},
-    scales:{y:{grid:gridOpt, max:40, ticks:{callback:v=>v+"%"}}, x:{grid:{display:false}}}}});
+    scales:{y:{grid:gridOpt, beginAtZero:true, max:40, ticks:{callback:v=>v+"%"}}, x:{grid:{display:false}}}}});
 bijRefWijziging("opleiding", () => {
   const ref = refDatasets("verdelingen.opleiding", D.opleiding.labels, {maxBarThickness:36});
   g.data.datasets = [eigen, ...ref];
@@ -1172,8 +1616,10 @@ const onderDrempel = [];
 rijen.forEach(r => {
   DELEN.forEach(([sleutel, label]) => {
     const deel = r.delen[sleutel];
-    if (deel && deel.n != null && deel.n < N_DREMPEL) {
-      onderDrempel.push(`${r.naam} — ${label} (n=${deel.n})`);
+    /* Sinds #87 komt een deel onder de drempel leeg uit de pipeline (onderdrukt, zonder n);
+       de n-toets blijft voor data die van vóór die wijziging is. */
+    if (deel && !deel.nvt && (deel.onderdrukt || (deel.n != null && deel.n < N_DREMPEL))) {
+      onderDrempel.push(`${r.naam} — ${label}` + (deel.n != null ? ` (n=${deel.n})` : ""));
       deel.onderDrempel = true;
     }
   });
@@ -1205,7 +1651,9 @@ new Chart(canvas, {
         const r = rijen[c.dataIndex];
         const [sleutel, label] = DELEN[c.datasetIndex];
         const deel = r.delen[sleutel] || {};
-        if (deel.onderDrempel) return ` ${label}: te weinig waarnemingen (n=${deel.n})`;
+        if (deel.nvt) return ` ${label}: bestaat niet op dit niveau`;
+        if (deel.onderDrempel) return ` ${label}: te weinig waarnemingen` +
+          (deel.n != null ? ` (n=${deel.n})` : "");
         return ` ${label}: ${c.parsed.x.toLocaleString("nl-NL")}%` +
           (deel.n != null ? ` (n=${deel.n})` : "");
       }}},
@@ -1307,6 +1755,34 @@ wijkLijn = {
   }
 };
 
+/* plugin: dwarsstreepjes op de uiteinden van de bereiklijn (gebiedsmodus) ----------------
+   De bereiklijn is een staaf van drie pixels: Chart.js doet daarmee de plaatsing per
+   categorie, maar de uiteinden zijn dan niet te zien en de lijn oogt als een streepje dat
+   ergens ophoudt. Deze plugin zet er koppen op, zodat laagste en hoogste buurt aanwijsbaar
+   zijn. Alleen actief in de gebiedsmodus; in de buurtmodus staat `bereiken` leeg. */
+bereikKappen = {
+  id: "bereikKappen", bereiken: [], breedte: 15,
+  afterDatasetsDraw(chart) {
+    if (!bereikKappen.bereiken.length) return;
+    const meta = chart.getDatasetMeta(0);
+    const {ctx, chartArea: a, scales: {y}} = chart;
+    ctx.save();
+    ctx.strokeStyle = ASFALT; ctx.lineWidth = 2; ctx.lineCap = "butt";
+    bereikKappen.bereiken.forEach((b, i) => {
+      const el = meta.data[i];
+      if (!b || !el) return;
+      const half = bereikKappen.breedte / 2;
+      for (const waarde of [b.min, b.max]) {
+        const yp = y.getPixelForValue(waarde);
+        if (yp < a.top || yp > a.bottom) continue;
+        ctx.beginPath();
+        ctx.moveTo(el.x - half, yp); ctx.lineTo(el.x + half, yp); ctx.stroke();
+      }
+    });
+    ctx.restore();
+  }
+};
+
 /* Welke referentiewaarden horen bij deze indicator? Onvolledige aggregaten krijgen een ≥,
    want een cijfer met onderdrukte deelgebieden is een ondergrens (#37). */
 function refReeksenVoor(sleutel) {
@@ -1317,7 +1793,9 @@ function refReeksenVoor(sleutel) {
       if (typeof i.waarde !== "number") return null;
       return {
         waarde: i.waarde,
-        kleur: REF_KLEUR[r.niveau] || GRIJS,
+        /* refKleurVan en niet de vlakke niveaukleur: met meerdere gebieden aan waren die
+           lijnen anders allemaal hetzelfde groen (#106). */
+        kleur: refKleurVan(r),
         label: r.naam + (i.volledig === false ? ` (≥, ${i.nOnderdrukt} onderdrukt)` : ""),
       };
     })
@@ -1331,12 +1809,12 @@ chBuurtObj = new Chart(chBuurt, {type:"bar",
     plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=> c.parsed.y==null ? " geen cijfer" : ` ${c.parsed.y.toLocaleString("nl-NL")}`}}},
     scales:{y:{grid:gridOpt, beginAtZero:true}, x:{grid:{display:false}}}},
-  plugins:[wijkLijn]});
+  plugins:[wijkLijn, bereikKappen]});
 
 /* ---- niveaukeuze: per gebied of per buurt ----
    Bij een rayon is de eerste vraag niet "hoe scoort dit rayon" maar "zit het verschil tussen
-   mijn gebieden of erbinnen". De gebiedsweergave antwoordt dat in één beeld: een balk per
-   gebied die de spreiding van zijn buurten spant, met een stip op de eigen gebiedswaarde.
+   mijn gebieden of erbinnen". De gebiedsweergave antwoordt dat in één beeld: per gebied een
+   lijn van de laagste tot de hoogste buurt, met een ruit op de eigen gebiedswaarde.
    Bij een gebied van één wijk is er geen tussenniveau en verdwijnt de keuze. */
 /* Op gemeenteniveau zijn de constituerende wijken alle 22 CBS-wijken, inclusief de acht
    haven-, bedrijven- en watergebieden. Die horen bij geen rayon en zijn als vergelijkings-
@@ -1368,22 +1846,31 @@ toonIndicator = function(key){
   let zonderCijfer = 0, uitersten2 = null;
 
   if (gebiedModus) {
+    /* Was een zwevende balk van laagste tot hoogste buurt. Die balk begon niet bij nul en las
+       daardoor als een afgekapte staaf: een staaf codeert lengte vanaf nul, en deze codeerde
+       een bereik. Nu een dunne lijn met dwarsstreepjes op de uiteinden plus een ruit op het
+       gebiedscijfer — een puntweergave met bereik, waar geen nulpunt bij hoort. De drager
+       blijft een `bar` van drie pixels, want daarmee doet Chart.js de plaatsing per categorie;
+       de koppen komen van de plugin bereikKappen. */
     const spreiding = spreidingPerGebied(ind);
+    bereikKappen.bereiken = spreiding;
     chBuurtObj.data.labels = BV.gebieden.map(g => g.naam);
     chBuurtObj.data.datasets = [
-      { /* zwevende balk: laagste tot hoogste buurt binnen dit gebied */
-        label: "spreiding tussen buurten", type: "bar", order: 2,
+      { label: "laagste–hoogste buurt", type: "bar", order: 2,
         data: spreiding.map(s => s ? [s.min, s.max] : null),
-        backgroundColor: BETON, borderColor: ASFALT, borderWidth: 1, maxBarThickness: 90},
-      { /* Het gepubliceerde cijfer van het gebied zelf. Ligt per definitie binnen de balk,
+        backgroundColor: ASFALT, borderWidth: 0, maxBarThickness: 3},
+      { /* Het gepubliceerde cijfer van het gebied zelf. Ligt per definitie binnen het bereik,
            dus het moet er bovenop en met contrast: order lager = later getekend, en een witte
-           rand zodat de ruit ook op het beige van de balk leesbaar blijft. */
+           rand zodat de ruit ook op de lijn leesbaar blijft. */
         label: "gebiedscijfer", type: "line", order: 1, showLine: false,
         data: BV.gebieden.map(g => ind.gebieden[g.code] ?? null),
         borderColor: "#FAFAF5", backgroundColor: "#B0452F", borderWidth: 2,
         pointStyle: "rectRot", pointRadius: 9, pointHoverRadius: 11},
     ];
     chBuurtObj.options.plugins.legend.display = true;
+    /* Een lijn van drie pixels is niet aan te wijzen; de tooltip volgt daarom de kolom in
+       plaats van het element. */
+    chBuurtObj.options.interaction = {mode: "index", intersect: false};
     chBuurtObj.options.plugins.tooltip.callbacks.label = c => {
       if (c.dataset.type === "line")
         return ` gebiedscijfer: ${c.parsed.y.toLocaleString("nl-NL")}`;
@@ -1392,6 +1879,8 @@ toonIndicator = function(key){
         `${s.max.toLocaleString("nl-NL")} (${s.n} met cijfer)` : " geen buurtcijfers";
     };
   } else {
+    bereikKappen.bereiken = [];
+    chBuurtObj.options.interaction = {};
     /* Gesorteerd op waarde, niet op geometrie-volgorde: bij 19 of 92 buurten is de
        PDOK-volgorde willekeurig en verbergt hij de verdeling. Buurten zonder gepubliceerd
        cijfer vallen weg in plaats van als nulbalk te verschijnen — dat las als "nul", niet
@@ -1438,8 +1927,8 @@ toonIndicator = function(key){
     const f = (a) => a.length > 1 && Math.min(...a) > 0
       ? (Math.max(...a) / Math.min(...a)) : null;
     const fG = f(gw), fB = f(bw);
-    sub = `${ind.naam} per gebied. Balk = spreiding tussen de buurten, ruit = het ` +
-      `gepubliceerde gebiedscijfer.`;
+    sub = `${ind.naam} per gebied. Lijn = laagste tot hoogste buurt binnen dat gebied, ` +
+      `ruit = het gepubliceerde gebiedscijfer.`;
     if (fG && fB) sub += ` Tussen gebieden ${fG.toFixed(1)}×, binnen buurten ${fB.toFixed(1)}× — ` +
       (fB > fG * 1.3
         ? "het verschil zit dus vooral bínnen de gebieden, niet ertussen."
@@ -1521,23 +2010,44 @@ D.buurtVergelijk.cbsBuurten.forEach((n, i) => { naarIdx[n] = i; });
 /* CBS 100×100m-laag: curated WMS-stijlen. De PDOK-service is per jaargang; de nieuwste
    wordt bij het laden automatisch gezocht (huidig jaar en drie jaar terug). */
 let wmsJaar = null;
-const wmsUrl = () =>
-  `https://service.pdok.nl/cbs/vierkantstatistieken100m/${wmsJaar}/wms/v1_0`;
-async function zoekWmsJaar(){
-  /* probe via de vaste legenda-PNG i.p.v. fetch: afbeeldingen kennen geen CORS-check,
-     dus niet-bestaande jaargangen (404 zonder CORS-headers) vervuilen de console niet */
-  const probeer = j => new Promise(res => {
-    const img = new Image();
-    img.onload = () => res(true);
-    img.onerror = () => res(false);
-    img.src = `https://service.pdok.nl/cbs/vierkantstatistieken100m/${j}` +
-      `/wms/v1_0/legend/vierkant_100m/${WMS_STANDAARD}.png`;
-  });
+/* Jaargang per stijl (#108). De zoektocht keek alleen of de standaardstijl (inwoners) in een
+   jaargang bestond en nam dan aan dat alle stijlen er waren. CBS publiceert de
+   nabijheidsvariabelen van de vierkantstatistiek echter niet altijd tegelijk met de rest, en
+   dan gaven de zes stijlen onder "Bereikbaarheid" in de nieuwste jaargang niets terug — "de
+   bereikbaarheidsindicatoren werken hier niet". Nu heeft elke stijl zijn eigen nieuwste
+   jaargang, en een stijl die in geen van de vier jaargangen bestaat wordt in de kiezer
+   uitgeschakeld in plaats van een lege laag te tonen. null = nergens gevonden. */
+const stijlJaar = {};
+const jaarVan = stijl => (stijl in stijlJaar ? stijlJaar[stijl] : wmsJaar);
+const wmsUrl = (jaar = wmsJaar) =>
+  `https://service.pdok.nl/cbs/vierkantstatistieken100m/${jaar}/wms/v1_0`;
+/* probe via de vaste legenda-PNG i.p.v. fetch: afbeeldingen kennen geen CORS-check,
+   dus niet-bestaande jaargangen (404 zonder CORS-headers) vervuilen de console niet */
+const legendaBestaat = (j, stijl) => new Promise(res => {
+  const img = new Image();
+  img.onload = () => res(true);
+  img.onerror = () => res(false);
+  img.src = `${wmsUrl(j)}/legend/vierkant_100m/${stijl}.png`;
+});
+const WMS_JAREN = (() => {
   const nu = new Date().getFullYear();
-  for (let j = nu; j >= nu - 3; j--) {
-    if (await probeer(j)) return j;
+  return [nu, nu - 1, nu - 2, nu - 3];
+})();
+async function zoekWmsJaar(){
+  for (const j of WMS_JAREN) {
+    if (await legendaBestaat(j, WMS_STANDAARD)) return j;
   }
   return null;
+}
+/* Per stijl de nieuwste jaargang, alle stijlen tegelijk. De standaardstijl is al bekend. */
+async function zoekStijlJaren(stijlen){
+  await Promise.all(stijlen.map(async stijl => {
+    if (stijl === WMS_STANDAARD) { stijlJaar[stijl] = wmsJaar; return; }
+    for (const j of WMS_JAREN) {
+      if (await legendaBestaat(j, stijl)) { stijlJaar[stijl] = j; return; }
+    }
+    stijlJaar[stijl] = null;
+  }));
 }
 const WMS_STIJLEN = [
   ["Bevolking & wonen", [
@@ -1605,6 +2115,8 @@ initKaart = function(){
     stijlen.forEach(([waarde, label]) => {
       const opt = document.createElement("option");
       opt.value = waarde; opt.textContent = label;
+      /* het kale label apart, want de optietekst krijgt straks de jaargang erbij */
+      opt.dataset.label = label;
       og.appendChild(opt);
     });
     stijlKiezer.appendChild(og);
@@ -1613,17 +2125,27 @@ initKaart = function(){
   const toonLegenda = () => {
     legenda.style.display = wmsActief ? "block" : "none";
     if (!wmsActief) return;
-    const label = stijlKiezer.selectedOptions[0].textContent;
+    const optie = stijlKiezer.selectedOptions[0];
+    const label = optie.dataset.label || optie.textContent;
+    const jaar = jaarVan(stijlKiezer.value);
     /* PDOK kent geen GetLegendGraphic; de legenda staat als vaste PNG per stijl online */
     let html =
       `<img alt="Legenda CBS 100×100m-laag (${label})" ` +
-      `src="${wmsUrl()}/legend/vierkant_100m/${stijlKiezer.value}.png" ` +
+      `src="${wmsUrl(jaar)}/legend/vierkant_100m/${stijlKiezer.value}.png" ` +
       `style="max-width:100%" onerror="this.replaceWith('(legenda niet beschikbaar — PDOK niet bereikbaar?)')"> ` +
-      `<span>CBS 100×100 m: ${label} (${wmsJaar}, CC BY 4.0). Klik op de kaart voor de celwaarden.</span>`;
+      `<span>CBS 100×100 m: ${label} (${jaar}, CC BY 4.0). Klik op de kaart voor de celwaarden.</span>`;
+    /* Hoe de 100 m-laag zich verhoudt tot de buurtindicator. Dit stond er als rode melding
+       "heeft geen 100 m-equivalent", en omdat de standaardindicator (inkomen) er geen heeft,
+       stond die melding er vrijwel altijd — ook bij iemand die bewust een andere laag koos.
+       Het is uitleg, geen fout (#108): dus neutraal, en alleen als er iets uit te leggen is. */
     const ind = D.buurtVergelijk.indicatoren[laatsteKey];
-    if (ind && !INDICATOR_NAAR_WMS[laatsteKey]) html +=
-      `<br><span style="color:#B0452F">De gekozen buurtindicator “${ind.naam}” heeft geen ` +
-      `100 m-equivalent; de 100 m-laag toont los daarvan “${label}”.</span>`;
+    const passend = INDICATOR_NAAR_WMS[laatsteKey];
+    if (ind && passend === stijlKiezer.value) html +=
+      `<br><span style="color:var(--asfalt-zacht)">Volgt de buurtindicator “${ind.naam}”.</span>`;
+    else if (ind) html +=
+      `<br><span style="color:var(--asfalt-zacht)">Staat los van de buurtindicator ` +
+      `“${ind.naam}”` + (passend ? "." : ": daarvan publiceert CBS geen 100 m-cijfer.") +
+      "</span>";
     legenda.innerHTML = html;
   };
   bijwerkLegenda = toonLegenda;
@@ -1638,14 +2160,37 @@ initKaart = function(){
       return;
     }
     wmsJaar = jaar;
-    wmsLaag = L.tileLayer.wms(wmsUrl(),
+    cbsWms = {jaar, url: stijl => wmsUrl(jaarVan(stijl))};
+    return zoekStijlJaren(WMS_STIJLEN.flatMap(([, stijlen]) => stijlen.map(([w]) => w)));
+  }).then(() => {
+    if (wmsJaar == null) return;
+    /* In de kiezer zichtbaar maken wat er per stijl te krijgen is: een oudere jaargang staat
+       erbij, een ontbrekende stijl is uitgeschakeld. Anders is een lege laag niet te
+       onderscheiden van een gebied waar niemand woont. */
+    stijlKiezer.querySelectorAll("option").forEach(opt => {
+      const j = stijlJaar[opt.value];
+      if (j === null) {
+        opt.disabled = true;
+        opt.textContent = `${opt.dataset.label} — niet bij PDOK (${WMS_JAREN.at(-1)}–${WMS_JAREN[0]})`;
+      } else if (j !== wmsJaar) {
+        opt.textContent = `${opt.dataset.label} (${j})`;
+      }
+    });
+    /* De jaargang staat in de legenda, die per stijl wisselt; in de attributie zou hij na
+       een stijlwissel blijven hangen. */
+    wmsLaag = L.tileLayer.wms(wmsUrl(jaarVan(stijlKiezer.value || WMS_STANDAARD)),
       {layers:"vierkant_100m", styles:stijlKiezer.value || WMS_STANDAARD,
        format:"image/png", transparent:true, opacity:.7,
-       attribution:`CBS vierkantstatistieken ${wmsJaar} via PDOK (CC BY 4.0)`});
+       attribution:"CBS vierkantstatistieken via PDOK (CC BY 4.0)"});
     wmsToggle.disabled = false;
   });
   stijlKiezer.addEventListener("change", () => {
-    if (wmsLaag) wmsLaag.setParams({styles: stijlKiezer.value});
+    if (wmsLaag) {
+      /* Een stijl uit een andere jaargang zit op een andere service-URL. */
+      const url = wmsUrl(jaarVan(stijlKiezer.value));
+      if (wmsLaag._url !== url) wmsLaag.setUrl(url, true);
+      wmsLaag.setParams({styles: stijlKiezer.value});
+    }
     toonLegenda();
   });
   wmsToggle.addEventListener("change", e=>{
@@ -1660,10 +2205,11 @@ initKaart = function(){
   /* klik met actieve 100m-laag: celwaarden opvragen via GetFeatureInfo (JSON, CORS open) */
   kaart.on("click", async e => {
     if (!wmsActief || !wmsJaar || kaart.getZoom() < 12) return;
+    const celJaar = jaarVan(stijlKiezer.value);
     const size = kaart.getSize(), pt = kaart.latLngToContainerPoint(e.latlng);
     const sw = L.CRS.EPSG3857.project(kaart.getBounds().getSouthWest());
     const ne = L.CRS.EPSG3857.project(kaart.getBounds().getNorthEast());
-    const url = wmsUrl() + "?" + new URLSearchParams({
+    const url = wmsUrl(celJaar) + "?" + new URLSearchParams({
       service:"WMS", version:"1.1.1", request:"GetFeatureInfo",
       layers:"vierkant_100m", query_layers:"vierkant_100m", styles:"",
       srs:"EPSG:3857", bbox:`${sw.x},${sw.y},${ne.x},${ne.y}`,
@@ -1686,7 +2232,7 @@ initKaart = function(){
             ? `<b>${label}: ${w}</b>` : `${label}: ${w}`;
         }).filter(Boolean).join("<br>");
         inhoud = `<b>CBS 100×100 m-cel</b> ${f.properties.crs28992res100m ?? ""}<br>` +
-          `${regels}<br><i>CBS vierkantstatistieken ${wmsJaar}, CC BY 4.0</i>`;
+          `${regels}<br><i>CBS vierkantstatistieken ${celJaar}, CC BY 4.0</i>`;
       }
     } catch (err) {
       inhoud = "Celwaarden niet opgehaald (PDOK niet bereikbaar?).";
@@ -1694,28 +2240,8 @@ initKaart = function(){
     L.popup({maxHeight:260}).setLatLng(e.latlng).setContent(inhoud).openOn(kaart);
   });
 
-  /* OV-haltes (GTFS) en fietsnetwerk (OSM) als optionele lagen, indien gegenereerd */
-  const lagen = {};
-  if (typeof OV !== "undefined") {
-    lagen.ovToggle = L.layerGroup(OV.haltes.map(h =>
-      L.circleMarker([h.lat, h.lon],
-        {radius: h.lijnen.includes("E") ? 7 : 4.5,
-         color:"#FAFAF5", weight:1, fillColor: h.binnen ? SCHIE : "#7A7A6C", fillOpacity:.9})
-       .bindPopup(`<b>${h.naam}</b><br>lijn ${h.lijnen.join(", ")}<br>` +
-                  `${h.vertrekken.toLocaleString("nl-NL")} vertrekken op ${OV.peildatum}` +
-                  (h.binnen ? "" : "<br><i>buiten de wijkgrens</i>"))));
-  }
-  if (typeof INFRA !== "undefined") {
-    lagen.fietsToggle = L.geoJSON(INFRA.fietsnet, {style:{color:POLDER, weight:2, opacity:.8}});
-  }
-  Object.entries(lagen).forEach(([id, laag]) => {
-    const cb = document.getElementById(id);
-    if (!cb) return;
-    cb.disabled = false;
-    cb.addEventListener("change", e => {
-      if (e.target.checked) { laag.addTo(kaart); } else { kaart.removeLayer(laag); }
-    });
-  });
+  /* Geen OV- of fietslaag meer op deze kaart (#129): die hebben hun eigen kaart in sectie 06
+     en staan samen in de lagenkaart. Deze kaart gaat over de buurtindicatoren. */
 
   if (updateKaart) updateKaart(laatsteKey);
 }
@@ -1765,7 +2291,10 @@ updateKaart = function(key){
   /* 100m-laag volgt de indicator wanneer er een passende CBS-stijl bestaat */
   const stijlKiezer = document.getElementById("wmsStijl");
   const passend = INDICATOR_NAAR_WMS[key];
-  if (wmsActief && passend && stijlKiezer && stijlKiezer.value !== passend) {
+  /* Niet naar een stijl springen die in de kiezer is uitgeschakeld omdat PDOK hem niet heeft. */
+  const passendOptie = stijlKiezer && stijlKiezer.querySelector(`option[value="${passend}"]`);
+  if (wmsActief && passend && stijlKiezer && stijlKiezer.value !== passend
+      && !(passendOptie && passendOptie.disabled)) {
     stijlKiezer.value = passend;
     stijlKiezer.dispatchEvent(new Event("change"));
   }
@@ -1883,7 +2412,7 @@ const g = new Chart(chNabij, {type:"bar",
     plugins:{legend:{display:false, position:"bottom"},
       tooltip:{callbacks:{label:c=>
         ` ${c.dataset.label}: ${c.parsed.x.toLocaleString("nl-NL")} km`}}},
-    scales:{x:{grid:gridOpt, title:{display:true,text:"km over de weg"}}, y:{grid:{display:false}}}}});
+    scales:{x:{grid:gridOpt, beginAtZero:true, title:{display:true,text:"km over de weg"}}, y:{grid:{display:false}}}}});
 /* Deze grafiek krijgt (nog) géén referentiereeks, en dat is een bewuste uitzondering.
 
    `D.nabijheid` wordt in het blok "cbs-verrijking" bovenaan overschreven door de
@@ -1922,10 +2451,24 @@ const rangSoort = s => {
   return i === -1 ? SOORT_VOLGORDE.length : i;
 };
 const getal = n => n.toLocaleString("nl-NL");
-const uur = t => (t || "").slice(0, 5);
 /* GTFS telt na middernacht door (24:00+); "eerste" is dus de vroegste, "laatste" de laatste */
 const vroegste = (a, b) => (!a || b < a ? b : a);
 const laatste = (a, b) => (!a || b > a ? b : a);
+/* Gemiddeld aantal per bedieningsuur (#132): per dag gedeeld door de uren tussen eerste en
+   laatste vertrek. GTFS-tijden lopen na middernacht door (25:10), dus gewoon aftrekken klopt.
+   Een venster van nul (één rit, of eerste = laatste) geeft geen getal in plaats van oneindig.
+   Een daggemiddelde: de spitsfrequentie volgt in #101. */
+const minuten = t => { const [h, m] = (t || "").split(":").map(Number); return h * 60 + m; };
+const perUur = (aantal, eerste, laatste) => {
+  const uren = (minuten(laatste) - minuten(eerste)) / 60;
+  if (!(uren > 0) || !Number.isFinite(uren) || aantal == null) return "—";
+  const v = aantal / uren;
+  return v.toLocaleString("nl-NL", {maximumFractionDigits: v < 10 ? 1 : 0});
+};
+/* Een halte kent alleen lijnnummers, en een nummer kan bij meerdere vervoerders voorkomen
+   (bus 395 rijdt voor drie). Daarom per nummer álle lijnen, en het venster over die samen. */
+const lijnenVan = {};
+OV.lijnen.forEach(l => { (lijnenVan[l.lijn] = lijnenVan[l.lijn] || []).push(l); });
 
 /* lijn -> soort, zodat haltes (die alleen lijnnummers kennen) per vervoerwijze telbaar zijn */
 const soortVanLijn = {};
@@ -1957,8 +2500,9 @@ if (sBody) {
       `<td><b style="color:${KLEUR_SOORT[soort] || ASFALT}">■</b> ${soort}</td>` +
       `<td class="getal">${getal(r.lijnen)}</td>` +
       `<td class="getal">${getal(r.ritten)}</td>` +
+      `<td class="getal">${perUur(r.ritten, r.eerste, r.laatste)}</td>` +
       `<td class="getal">${getal(r.haltes.size)}</td>` +
-      `<td>${uur(r.eerste)}–${uur(r.laatste)}</td>`;
+      `<td>${vensterGTFS(r.eerste, r.laatste)}</td>`;
     sBody.appendChild(tr);
   });
   const tot = rijen.reduce((a, [, r]) => ({
@@ -1970,8 +2514,9 @@ if (sBody) {
   tr.innerHTML =
     `<td>totaal</td><td class="getal">${getal(tot.lijnen)}</td>` +
     `<td class="getal">${getal(tot.ritten)}</td>` +
+    `<td class="getal">${perUur(tot.ritten, tot.eerste, tot.laatste)}</td>` +
     `<td class="getal">${getal(OV.haltes.length)}</td>` +
-    `<td>${uur(tot.eerste)}–${uur(tot.laatste)}</td>`;
+    `<td>${vensterGTFS(tot.eerste, tot.laatste)}</td>`;
   sBody.appendChild(tr);
 }
 
@@ -1990,6 +2535,11 @@ if (kBody) {
       `<td>${h.naam}</td>` +
       `<td>${nrs} <span style="color:var(--asfalt-zacht)">(${(h.lijnen || []).length})</span></td>` +
       `<td class="getal">${getal(h.vertrekken)}</td>` +
+      /* Een halte kent in de data geen eigen eerste en laatste vertrek; het venster van zijn
+         lijnen is de benadering (zie de voetnoot). */
+      `<td class="getal">${perUur(h.vertrekken,
+        (h.lijnen || []).flatMap(nr => (lijnenVan[nr] || []).map(l => l.eerste)).reduce(vroegste, ""),
+        (h.lijnen || []).flatMap(nr => (lijnenVan[nr] || []).map(l => l.laatste)).reduce(laatste, ""))}</td>` +
       `<td>${h.binnen ? "in het gebied" : "net buiten de grens"}</td>`;
     kBody.appendChild(tr);
   });
@@ -2010,7 +2560,8 @@ if (body) {
         `<td><b style="color:${KLEUR_SOORT[l.soort] || ASFALT}">${l.soort} ${l.lijn}</b></td>` +
         `<td>${traject}</td>` +
         `<td class="getal">${getal(l.ritten)}</td>` +
-        `<td>${uur(l.eerste)}–${uur(l.laatste)}</td>` +
+        `<td class="getal">${perUur(l.ritten, l.eerste, l.laatste)}</td>` +
+        `<td>${vensterGTFS(l.eerste, l.laatste)}</td>` +
         `<td>${l.binnenWijk ? "ja" : "nee — halte net buiten"}</td>`;
       body.appendChild(tr);
     });
@@ -2027,10 +2578,12 @@ if (feiten) {
   const stations = Object.entries(OV.stationsNabijM || {})
     .map(([n, m]) => `${n} (±${m.toLocaleString("nl-NL")} m buiten de wijkgrens)`);
   feiten.innerHTML =
-    `<div class="cell"><div class="num">${binnen}</div>` +
-    `<div class="lbl">OV-halteplaatsen binnen de wijk</div><div class="src">GTFS/NDOV ${OV.peildatum}</div></div>` +
-    (stations.length ? `<div class="cell"><div class="num">${stations.length}</div>` +
-      `<div class="lbl">station(s) nabij: ${stations.join(", ")}</div><div class="src">GTFS/NDOV</div></div>` : "");
+    tegelHtml(binnen, "OV-halteplaatsen binnen de wijk", `GTFS/NDOV ${OV.peildatum}`,
+      "ov-tabel/halteplaatsen") +
+    (stations.length
+      ? tegelHtml(stations.length, `station(s) nabij: ${stations.join(", ")}`, "GTFS/NDOV",
+          "ov-tabel/stations-nabij")
+      : "");
 }
 const foot = document.getElementById("ovFoot");
 if (foot) foot.textContent = "Bron: " + OV.bron + " · peildatum " + OV.peildatum +
@@ -2088,7 +2641,7 @@ const groepen = {};
      .bindPopup(`<b>${l.soort} ${l.lijn}</b> — ${l.vervoerder}<br>` +
        ((l.traject && l.traject !== "lijn") ? l.traject + "<br>" : "") +
        `${l.ritten.toLocaleString("nl-NL")} ritten op ${OV.peildatum} · ` +
-       `${l.eerste.slice(0,5)}–${l.laatste.slice(0,5)}`)));
+       vensterGTFS(l.eerste, l.laatste))));
 });
 groepen.haltes = L.layerGroup(OV.haltes.map(h =>
   L.circleMarker([h.lat, h.lon],
@@ -2149,10 +2702,11 @@ const odinZichtbaar = lijst => (Array.isArray(lijst) ? lijst : []).filter(r => !
 /* Melding in een grafiekvoetnoot; leeg als er niets onderdrukt is. */
 const odinOnderdruktTekst = lijst => {
   const o = (Array.isArray(lijst) ? lijst : []).find(r => r.onderdrukt);
-  return o
-    ? ` ${o.categorieen} categorie${o.categorieen === 1 ? "" : "ën"} met te weinig ` +
-      `waarnemingen (samen ${o.share}% van de verplaatsingen) is weggelaten.`
-    : "";
+  if (!o) return "";
+  return o.share == null
+    ? ` ${o.label || "Een categorie"} heeft te weinig waarnemingen en is leeggelaten.`
+    : ` ${o.categorieen} categorie${o.categorieen === 1 ? "" : "ën"} met te weinig ` +
+      `waarnemingen (samen ${o.share}% van de verplaatsingen) is weggelaten.`;
 };
 /* Vervangt een grafiek door een rode melding als de selectie onder de drempel valt. */
 const odinTeKlein = (canvasId, wat) => {
@@ -2166,9 +2720,17 @@ const odinTeKlein = (canvasId, wat) => {
   c.replaceWith(p);
 };
 
+/* De niveaubadge van een grafiek zegt welke meetniveaus er in beeld staan. Bij de
+   ODiN-grafieken hangt dat sinds #109 af van de keuze in de balk, dus de badge ook: een vaste
+   "wijk · gemeente · provincie" klopte niet meer zodra de gemeente uitstond. */
+function zetNiveauBadge(onderwerp, niveaus) {
+  const el = document.querySelector(`[data-onderwerp="${onderwerp}"] .status.niveau`);
+  if (el) el.textContent = [...new Set(niveaus)].join(" · ");
+}
+
 veilig("grafiek-modal", () => {
 /* ---------- modal split op drie niveaus: wijk & gemeente (ODiN-microdata) + provincie (StatLine) ---------- */
-const reeksen = [];
+let eigenReeks = null, rdamReeks = null, zhReeks = null;
 const bronnen = [];
 const naarShares = lijst => {
   const uit = Object.fromEntries(VERVOERWIJZEN.map(w => [w, 0]));
@@ -2176,10 +2738,10 @@ const naarShares = lijst => {
   return VERVOERWIJZEN.map(w => Math.round(uit[w] * 10) / 10 || null);
 };
 if (typeof ODINW !== "undefined" && ODINW.modalSplit) {
-  reeksen.push({label:`${GEBIEDNAAM} — ${GEBIEDNIVEAU} (n=${ODINW.n.verplaatsingen})`, kleur:GEEL,
-                data:naarShares(odinZichtbaar(ODINW.modalSplit.wijk))});
-  reeksen.push({label:`Rotterdam — gemeente (n=${ODINW.modalSplit.nRotterdam.toLocaleString("nl-NL")})`,
-                kleur:SCHIE, data:naarShares(odinZichtbaar(ODINW.modalSplit.rotterdam))});
+  eigenReeks = {label:`${GEBIEDNAAM} — ${GEBIEDNIVEAU} (n=${ODINW.n.verplaatsingen})`, kleur:GEEL,
+                data:naarShares(odinZichtbaar(ODINW.modalSplit.wijk))};
+  rdamReeks = {label:`Rotterdam — gemeente (n=${ODINW.modalSplit.nRotterdam.toLocaleString("nl-NL")})`,
+                kleur:SCHIE, data:naarShares(odinZichtbaar(ODINW.modalSplit.rotterdam))};
   bronnen.push(ODINW.bron + " (" + ODINW.peildatum + ")");
 }
 if (typeof CBSMOB !== "undefined" && CBSMOB.modalSplit) {
@@ -2190,12 +2752,12 @@ if (typeof CBSMOB !== "undefined" && CBSMOB.modalSplit) {
     const totaal = zh["Totaal"];
     const lijst = Object.entries(zh).filter(([k]) => k.trim() !== "Totaal")
       .map(([k, v]) => ({label:k, share: 100 * v / totaal}));
-    reeksen.push({label:`Zuid-Holland — provincie (${jaar}, ${ms.jaren[jaar].status.toLowerCase()})`,
-                  kleur:GRIJS, data:naarShares(lijst)});
+    zhReeks = {label:`Zuid-Holland — provincie (${jaar}, ${ms.jaren[jaar].status.toLowerCase()})`,
+                  kleur:GRIJS, data:naarShares(lijst)};
     bronnen.push(ms.bron);
   }
 }
-if (!reeksen.length) return;
+if (!eigenReeks && !zhReeks) return;
 /* Referentiegebieden als extra reeks. Hun ODiN-verdeling gaat door dezelfde canonisering als
    de eigen reeks: in de microdata heet het "Personenauto - bestuurder" en in de grafiek
    "Auto", en twee reeksen die verschillend zijn gegroepeerd vergelijken niets. De drempel van
@@ -2213,21 +2775,46 @@ const refModal = () => refActief().filter(r => r.code !== GEMEENTECODE).map(r =>
 const modalDataset = r => ({
   label:r.label, data:r.data, backgroundColor:r.kleur,
   borderColor:ASFALT, borderWidth:1, maxBarThickness:13});
+/* Zuid-Holland staat niet in de balk — het is geen gebied uit de gebiedsboom maar een andere
+   bron (StatLine, eigen methode en jaargang). Daarom een eigen vinkje bij deze grafiek,
+   standaard uit, zodat "wat in de balk staat, staat in de grafiek" ook hier geldt (#109). */
+const sub = document.getElementById("modalSub");
+let zhVinkje = null;
+if (zhReeks && sub) {
+  const l = document.createElement("label");
+  l.style.cssText = "display:block;margin-top:4px;cursor:pointer";
+  l.innerHTML = '<input type="checkbox" data-modal-zh> Ook Zuid-Holland tonen ' +
+    '<span style="color:var(--asfalt-zacht)">(CBS StatLine: andere bron en methode dan ODiN)</span>';
+  sub.after(l);
+  zhVinkje = l.querySelector("input");
+}
+const zichtbareReeksen = () => [
+  ...(eigenReeks ? [eigenReeks] : []),
+  ...(rdamReeks && gemeenteReeksAan() ? [rdamReeks] : []),
+  ...(zhReeks && zhVinkje && zhVinkje.checked ? [zhReeks] : []),
+  ...(eigenReeks ? refModal() : []),
+];
 const gModal = new Chart(chModal, {type:"bar",
-  data:{labels:VERVOERWIJZEN, datasets:reeksen.map(modalDataset)},
+  data:{labels:VERVOERWIJZEN, datasets:zichtbareReeksen().map(modalDataset)},
   options:{indexAxis:"y", maintainAspectRatio:false,
     plugins:{legend:{position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label.split(" (")[0]}: ${nl(c.parsed.x)}% van de verplaatsingen`}}},
-    scales:{x:{grid:gridOpt, title:{display:true,text:"% van de verplaatsingen"}}, y:{grid:{display:false}}}}});
-bijRefWijziging("modal-split", () => {
-  gModal.data.datasets = [...reeksen, ...refModal()].map(modalDataset);
+    scales:{x:{grid:gridOpt, beginAtZero:true, title:{display:true,text:"% van de verplaatsingen"}}, y:{grid:{display:false}}}}});
+const tekenModal = () => {
+  gModal.data.datasets = zichtbareReeksen().map(modalDataset);
   gModal.update();
-});
+  zetNiveauBadge("grafiek-modal", [GEBIEDNIVEAU,
+    ...(rdamReeks && gemeenteReeksAan() ? ["gemeente"] : []),
+    ...refActief().filter(r => r.code !== GEMEENTECODE).map(r => r.niveau),
+    ...(zhVinkje && zhVinkje.checked ? ["provincie"] : [])]);
+};
+bijRefWijziging("modal-split", tekenModal);
+if (zhVinkje) zhVinkje.addEventListener("change", tekenModal);
 /* De modal split gaat door naarShares(), dus refDrempelTekst() (die op labels uitlijnt) past
    hier niet; wat er onder de drempel viel staat al in de voetnoot van de eigen reeks via
    odinOnderdruktTekst(). */
-const sub = document.getElementById("modalSub");
-if (sub) sub.textContent = "Aandeel verplaatsingen per hoofdvervoerwijze; drie meetniveaus naast elkaar.";
+if (sub) sub.textContent = "Aandeel verplaatsingen per hoofdvervoerwijze. De vergelijking volgt " +
+  "de keuze in de balk bovenaan.";
 const foot = document.getElementById("modalFoot");
 if (foot) {
   const weg = typeof ODINW !== "undefined" && ODINW.modalSplit
@@ -2267,7 +2854,7 @@ const dataset = (groep, stack, data, vaag) => ({
   label:(vaag ? "_" : "") + groep, stack, data,
   backgroundColor:KLEUR_GROEP[groep] + (vaag ? "80" : ""),
   borderColor:ASFALT, borderWidth:.5, maxBarThickness:22});
-new Chart(el, {type:"bar",
+const gAfstand = new Chart(el, {type:"bar",
   data:{labels:AM.banden, datasets:[
     ...GROEPEN.map(g => dataset(g, "wijk", wijkS[g], false)),
     ...GROEPEN.map(g => dataset(g, "rdam", rdamS[g], true))
@@ -2285,11 +2872,26 @@ new Chart(el, {type:"bar",
     scales:{x:{stacked:true, max:100, grid:gridOpt,
                title:{display:true, text:"% van de verplaatsingen in de afstandsband"}},
             y:{stacked:true, grid:{display:false}}}}});
-let sub = "Per afstandsband twee gestapelde balken: bovenste = wijkbewoners (vol), " +
-  "onderste = alle Rotterdammers (doorzichtig). Percentages tellen per balk op tot 100.";
+/* De Rotterdam-stapel volgt de balk, net als de andere ODiN-grafieken (#109). Andere
+   vergelijkingsgebieden kan deze grafiek niet tonen: de afstandsverdeling staat niet in de
+   referentielaag. Dat staat er dan bij, in plaats van dat een gekozen rayon stil ontbreekt. */
 const onderdrukte = AM.wijk.filter(r => r.onderdrukt).map(r => r.band);
-if (onderdrukte.length) sub += ` Banden met te weinig waarnemingen zijn weggelaten: ${onderdrukte.join(", ")}.`;
-document.getElementById("afstandSub").textContent = sub;
+bijRefWijziging("odin-afstand", () => {
+  const rdamAan = gemeenteReeksAan();
+  gAfstand.data.datasets.forEach(d => { if (d.stack === "rdam") d.hidden = !rdamAan; });
+  gAfstand.update();
+  const anderen = refActief().filter(r => r.code !== GEMEENTECODE).map(r => r.naam);
+  let sub = rdamAan
+    ? "Per afstandsband twee gestapelde balken: bovenste = bewoners van het gebied (vol), " +
+      "onderste = alle Rotterdammers (doorzichtig). Percentages tellen per balk op tot 100."
+    : "Per afstandsband de verdeling over vervoerwijzen voor bewoners van het gebied; " +
+      "percentages tellen per balk op tot 100.";
+  if (onderdrukte.length) sub += ` Banden met te weinig waarnemingen zijn weggelaten: ${onderdrukte.join(", ")}.`;
+  if (anderen.length) sub += ` Voor ${anderen.join(", ")} is deze verdeling niet beschikbaar; ` +
+    "alleen Rotterdam kan hier ernaast.";
+  document.getElementById("afstandSub").textContent = sub;
+  zetNiveauBadge("odin-afstand", [GEBIEDNIVEAU, ...(rdamAan ? ["gemeente"] : [])]);
+});
 document.getElementById("afstandFoot").textContent =
   "Bron: " + ODINW.bron + " · niveau: " + ODINW.niveau + ". " + AM.caveat + " " + ODINW.caveat;
 });
@@ -2321,8 +2923,12 @@ const leeg = blokken.filter(([, l]) => Array.isArray(l) && !l.length).map(([n]) 
 const deels = blokken
   .filter(([, l]) => Array.isArray(l) && l.some(r => r.onderdrukt))
   .map(([n, l]) => {
-    const o = l.find(r => r.onderdrukt);
-    return `${n} (${o.categorieen} categorie${o.categorieen === 1 ? "" : "ën"}, ${o.share}%)`;
+    const o = l.filter(r => r.onderdrukt);
+    /* Een dagdeel onder de drempel (#87) is leeg, ook zijn aandeel: dan het label noemen. */
+    const leegLabels = o.filter(r => r.share == null).map(r => r.label).filter(Boolean);
+    if (leegLabels.length) return `${n} (${leegLabels.join(", ")})`;
+    const r = o[0];
+    return `${n} (${r.categorieen} categorie${r.categorieen === 1 ? "" : "ën"}, ${r.share}%)`;
   });
 let waarschuwing = "";
 if (leeg.length) {
@@ -2334,7 +2940,15 @@ if (deels.length) {
     `${drempel.nMin ?? 20} waarnemingen zijn weggelaten bij ${deels.join(", ")}. ` +
     "De getoonde aandelen sluiten daarom niet op 100%.</b>";
 }
-el.innerHTML = "<b>Representativiteit:</b> " + ODINW.caveat +
+/* Eerst de korte, vaste boodschap en dan pas de verantwoording (#97). Het blok stond al
+   bovenaan, maar begon met de telling en de pooling; wie alleen de eerste regel leest, moet
+   al weten dat dit een steekproef is en geen registratie. */
+el.innerHTML = `<b>Indicatief — steekproefcijfers.</b> ODiN is een landelijke enquête onder ` +
+  `een steekproef van Nederlanders en is niet ontworpen voor uitspraken op ` +
+  `${GEBIEDNIVEAU}niveau. Hoe kleiner het aantal waarnemingen, hoe groter de marge: kleine ` +
+  "verschillen met een vergelijkingsgebied kunnen toeval zijn. Elke grafiek met ODiN-cijfers " +
+  "draagt daarom het label <span class=\"status odin\">ODiN · steekproef</span> met het " +
+  "aantal waarnemingen erbij.<br><b>Representativiteit:</b> " + ODINW.caveat +
   ` Niveau: ${ODINW.niveau}. Steekproef in dit gebied: ` +
   `${ODINW.n.personen.toLocaleString("nl-NL")} personen, ` +
   `${ODINW.n.verplaatsingen.toLocaleString("nl-NL")} verplaatsingen.` +
@@ -2354,24 +2968,26 @@ const eigenReeksen = () => [
   {label:GEBIEDLABEL, data:labels.map(l =>
      (mWijk.find(r => r.label === l) || {}).share ?? null),
    backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:14},
-  {label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
-   backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:14},
+  ...(gemeenteReeksAan() ? [{label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
+   backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:14}] : []),
 ];
 const gMotief = new Chart(chMotief, {type:"bar",
   data:{labels, datasets:eigenReeksen()},
   options:{indexAxis:"y", maintainAspectRatio:false,
     plugins:{legend:{position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${nl(c.parsed.x)}%`}}},
-    scales:{x:{grid:gridOpt, title:{display:true,text:"% van de verplaatsingen"}}, y:{grid:{display:false}}}}});
-/* De gemeentereeks blijft staan — die komt uit dezelfde ODiN-uitdraai en is de ijking die er
-   altijd was. De instelbare referenties komen ernaast, met dezelfde drempel van 20
-   waarnemingen als de eigen reeks (#13). */
+    scales:{x:{grid:gridOpt, beginAtZero:true, title:{display:true,text:"% van de verplaatsingen"}}, y:{grid:{display:false}}}}});
+/* De gemeentereeks komt uit dezelfde ODiN-uitdraai als de eigen reeks, maar staat er alleen
+   als de gemeente in de balk aanstaat (#109). De andere referenties komen ernaast, met
+   dezelfde drempel van 20 waarnemingen als de eigen reeks (#13). */
 const motiefFoot = document.getElementById("motiefFoot");
 const motiefBasis = motiefFoot ? motiefFoot.textContent : "";
 bijRefWijziging("motieven", () => {
-  gMotief.data.datasets = [...eigenReeksen(),
-    ...refDatasets("odin.motieven", labels, {maxBarThickness:9, zonder:[GEMEENTECODE]})];
+  const refs = refDatasets("odin.motieven", labels, {maxBarThickness:9, zonder:[GEMEENTECODE]});
+  gMotief.data.datasets = [...eigenReeksen(), ...refs];
   gMotief.update();
+  zetNiveauBadge("odin-motieven", [GEBIEDNIVEAU, ...(gemeenteReeksAan() ? ["gemeente"] : []),
+    ...refReeksen("odin.motieven", labels, {zonder:[GEMEENTECODE]}).map(r => r.niveau)]);
   /* Wat er uit een referentiereeks is weggelaten hoort onder de grafiek, niet in de console:
      anders sluiten de aandelen van een peer stil niet op 100%. */
   if (motiefFoot) {
@@ -2382,43 +2998,235 @@ bijRefWijziging("motieven", () => {
 });
 
 veilig("odin-bestemmingen", () => {
-/* ---------- waarheen: daily urban system (flow-kaart + aandelen) ---------- */
+/* ---------- waarheen: daily urban system (stroomkaart + aandelen) ----------
+   #151: de pijlen laten de omvang zien. Dikte ∝ √(verplaatsingen per dag), zodat een stroom van
+   100.000 niet alles wegdrukt en een van 2.000 nog zichtbaar is; kleur in vier klassen van één
+   tint (#30: geen rood/groen), zodat ook wie dikte slecht onderscheidt de volgorde ziet.
+   Het verkeer dat binnen het gebied blijft, is meestal verreweg de grootste stroom en stond eerst
+   alleen als tegel onder de kaart. Nu staat het óp de kaart: een cirkel rond de herkomst, en de
+   stromen tussen de delen van het gebied (wijken van een rayon, PC4-gebieden van een wijk).
+   Een stroom van een deel naar zichzelf is een ring.
+
+   De pijlen worden in schermpixels berekend en bij elke zoomstap opnieuw getekend: een boog in
+   graden wordt bij een andere zoom een andere boog, en een pijlpunt in graden groeit mee. */
 if (typeof ODINW === "undefined" || ODINW.leeg || typeof L === "undefined") return;
 const el = document.getElementById("kaartBestemming");
 if (!el) return;
+const B = ODINW.bestemmingen;
+const NMIN = ODINW.drempel?.nMin ?? 20;
 const [hlat, hlon] = ODINW.herkomstCentroid;
 const k = L.map("kaartBestemming", {scrollWheelZoom:false}).setView([hlat, hlon], 11);
 basiskaart().addTo(k);
 if (typeof GEO !== "undefined")
   L.geoJSON({type:"FeatureCollection", features:GEO.features},
-    {style:{color:ASFALT, weight:1.2, fill:false, dashArray:"4 3"}}).addTo(k);
-const doelen = [...ODINW.bestemmingen.topWijkenBinnenGemeente,
-                ...ODINW.bestemmingen.topGemeentenBuiten];
-const punten = [[hlat, hlon]];
-doelen.forEach(b => {
-  punten.push([b.lat, b.lon]);
-  L.polyline([[hlat, hlon], [b.lat, b.lon]],
-    {color:SCHIE, weight:1.5 + b.share * 1.1, opacity:.7}).addTo(k)
-   .bindPopup(`<b>${b.naam}</b><br>${nl(b.share)}% van de verplaatsingen van wijkbewoners (n=${b.n})`);
-  L.circleMarker([b.lat, b.lon], {radius:5, color:"#FAFAF5", weight:1,
-    fillColor:SCHIE, fillOpacity:.95}).addTo(k)
-   .bindPopup(`<b>${b.naam}</b><br>${nl(b.share)}% (n=${b.n})`);
-});
-L.circleMarker([hlat, hlon], {radius:7, color:ASFALT, weight:2,
-  fillColor:GEEL, fillOpacity:1}).addTo(k).bindPopup(`<b>${GEBIEDNAAM}</b> (herkomst)`);
-k.fitBounds(L.latLngBounds(punten).pad(.25));
+    {style:{color:ASFALT, weight:1.2, fill:false, dashArray:"4 3"}, interactive:false}).addTo(k);
+
+const TINTEN = ["#B9D0DE", "#7FA8C2", "#4A7F9F", "#1F4F6B"];   // één tint, licht → donker
+const heel = v => Math.round(v).toLocaleString("nl-NL");
+const perDag = v => `${heel(v)} per dag`;
+
+/* Twee lezingen: waar bewoners heen gaan, of waar bezoekers vandaan komen. Die tweede alleen
+   als de pipeline coördinaten meegeeft (data van vóór #151 heeft ze niet). */
+const heen = [
+  ...B.topWijkenBinnenGemeente.map(b => ({...b, soort: "gemeente"})),
+  ...B.topGemeentenBuiten.map(b => ({...b, soort: "buiten"})),
+].filter(b => b.lat != null);
+/* De eigen gemeente niet als één pijl: haar zwaartepunt ligt in de haven. Uit de eigen
+   gemeente per herkomstwijk; die heeft de pipeline apart (topHerkomstWijken). */
+const eigenGem = GEMEENTENAAM;
+const bezoek = [
+  ...(ODINW.bezoekers?.topHerkomstWijken || []),
+  ...(ODINW.bezoekers?.topHerkomst || []).filter(b => b.gemeente !== eigenGem)
+    .map(b => ({...b, naam: b.gemeente})),
+].filter(b => b.lat != null && b.vpd != null);
+const intern = B.intern || null;
+
+let modus = "heen";
+const laag = L.layerGroup().addTo(k);
+
+/* Klassengrenzen op de verplaatsingen per dag van wat nu getekend wordt: kwartielen, afgerond
+   op een leesbaar getal. Zo blijven de klassen bruikbaar van Hoek van Holland tot de gemeente. */
+function klassen(waarden) {
+  const s = [...waarden].sort((a, b) => a - b);
+  if (!s.length) return [];
+  const rond = v => { const m = 10 ** Math.max(0, Math.floor(Math.log10(v)) - 1); return Math.round(v / m) * m; };
+  return [.25, .5, .75].map(q => rond(s[Math.min(s.length - 1, Math.floor(q * s.length))]));
+}
+const klasseVan = (v, grenzen) => grenzen.filter(g => v >= g).length;
+
+/* Kwadratische boog van a naar b in pixels, uitbuigend naar rechts, plus de pijlpunt. */
+function boog(a, b, buig = .18) {
+  const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+  const c = L.point((a.x + b.x) / 2 - dy * buig, (a.y + b.y) / 2 + dx * buig);
+  const pts = [];
+  for (let i = 0; i <= 24; i++) {
+    const t = i / 24, u = 1 - t;
+    pts.push(L.point(u * u * a.x + 2 * u * t * c.x + t * t * b.x, u * u * a.y + 2 * u * t * c.y + t * t * b.y));
+  }
+  return {pts, len};
+}
+function pijl(van, naar, dikte, kleur, popup, {buig = .18, inkorten = 6} = {}) {
+  const a = k.latLngToLayerPoint(van), b = k.latLngToLayerPoint(naar);
+  const {pts, len} = boog(a, b, buig);
+  if (len < 4) return;
+  /* Laat de lijn iets vóór het doel stoppen, zodat de punt op de stip valt en niet erachter. */
+  /* Pijlpunt meeschalen met de dikte, maar nooit meer dan een derde van de pijl: bij een korte
+     stroom (naar de buurwijk) werd de punt anders groter dan de lijn. */
+  const kop = Math.min(Math.max(7, dikte * 2.2), len * .35);
+  dikte = Math.min(dikte, kop * .8);
+  const eind = pts[pts.length - 1], voor = pts[pts.length - 3];
+  const ang = Math.atan2(eind.y - voor.y, eind.x - voor.x);
+  const punt = L.point(eind.x - Math.cos(ang) * inkorten, eind.y - Math.sin(ang) * inkorten);
+  const basis = L.point(punt.x - Math.cos(ang) * kop, punt.y - Math.sin(ang) * kop);
+  const lijn = pts.slice(0, -2).concat([basis]).map(p => k.layerPointToLatLng(p));
+  L.polyline(lijn, {color:kleur, weight:dikte, opacity:.85, lineCap:"butt"})
+    .bindPopup(popup).addTo(laag);
+  const zij = kop * .62;
+  const drie = [punt,
+    L.point(basis.x + Math.sin(ang) * zij, basis.y - Math.cos(ang) * zij),
+    L.point(basis.x - Math.sin(ang) * zij, basis.y + Math.cos(ang) * zij)];
+  L.polygon(drie.map(p => k.layerPointToLatLng(p)),
+    {color:kleur, weight:1, fillColor:kleur, fillOpacity:.95}).bindPopup(popup).addTo(laag);
+}
+
+function teken() {
+  laag.clearLayers();
+  const stromen = modus === "heen" ? heen : bezoek;
+  const binnen = modus === "heen" && intern ? intern.stromen : [];
+  const alleVpd = [...stromen, ...binnen].map(s => s.vpd).filter(v => v > 0);
+  const max = Math.max(1, ...alleVpd);
+  const dikte = v => 1.5 + 13 * Math.sqrt(v / max);
+  const grenzen = klassen(alleVpd);
+  const kleur = v => TINTEN[klasseVan(v, grenzen)];
+
+  /* intern: eerst, zodat de stromen naar buiten erbovenop liggen */
+  if (modus === "heen" && intern) {
+    const eigenDeel = B.delen.binnenWijk;
+    if (eigenDeel?.share != null) {
+      L.circleMarker([hlat, hlon], {radius: 10 + 34 * Math.sqrt(eigenDeel.share / 100),
+        color:GEEL, weight:2, fillColor:GEEL, fillOpacity:.18, interactive:false}).addTo(laag);
+    }
+    for (const s of binnen) {
+      const pop = `<b>${s.van === s.naar ? `binnen ${s.van}` : `${s.van} → ${s.naar}`}</b><br>` +
+        `${perDag(s.vpd)} · ${nl(s.share)}% van de verplaatsingen van bewoners (n=${s.n})`;
+      if (s.van === s.naar) {
+        L.circleMarker(s.vanLatLon, {radius: 4 + 9 * Math.sqrt(s.vpd / max), color:kleur(s.vpd),
+          weight: Math.max(2, dikte(s.vpd) * .6), fill:false}).bindPopup(pop).addTo(laag);
+      } else {
+        pijl(s.vanLatLon, s.naarLatLon, dikte(s.vpd) * .8, kleur(s.vpd), pop, {buig:.25, inkorten:4});
+      }
+    }
+  }
+  for (const s of stromen) {
+    const pop = modus === "heen"
+      ? `<b>${s.naam}</b><br>${perDag(s.vpd)} · ${nl(s.share)}% van de verplaatsingen van ` +
+        `bewoners (n=${s.n})`
+      : `<b>uit ${s.naam}</b><br>${perDag(s.vpd)} · ${nl(s.share)}% van de bezoekers (n=${s.n})`;
+    const [van, naar] = modus === "heen" ? [[hlat, hlon], [s.lat, s.lon]] : [[s.lat, s.lon], [hlat, hlon]];
+    pijl(van, naar, dikte(s.vpd), kleur(s.vpd), pop);
+    L.circleMarker([s.lat, s.lon], {radius:4, color:"#FAFAF5", weight:1, fillColor:ASFALT,
+      fillOpacity:.9}).bindPopup(pop).addTo(laag);
+  }
+  L.circleMarker([hlat, hlon], {radius:7, color:ASFALT, weight:2, fillColor:GEEL, fillOpacity:1})
+    .bindPopup(`<b>${GEBIEDNAAM}</b>` + (B.delen.binnenWijk?.share != null && modus === "heen"
+      ? `<br>${nl(B.delen.binnenWijk.share)}% blijft binnen het gebied` +
+        (intern ? ` (${perDag(intern.vpd)})` : "") : "")).addTo(laag);
+  legenda(grenzen, max, dikte, stromen.length + binnen.length);
+}
+
+function legenda(grenzen, max, dikte, aantal) {
+  const box = document.getElementById("bestemmingLegenda");
+  if (!box) return;
+  if (!aantal) {
+    box.innerHTML = `<b style="color:var(--rood)">Geen enkele ${modus === "heen" ? "bestemming" : "herkomst"} ` +
+      `heeft ${NMIN} of meer waarnemingen; er is dus geen stroom te tekenen.</b>`;
+    return;
+  }
+  const van = [0, ...grenzen], tot = [...grenzen, null];
+  const stukken = TINTEN.slice(0, grenzen.length + 1).map((t, i) => {
+    const midden = tot[i] == null ? max : (van[i] + tot[i]) / 2;
+    return `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:12px">` +
+      `<span style="display:inline-block;width:26px;height:${Math.max(2, Math.round(dikte(midden)))}px;` +
+      `background:${t}"></span>${tot[i] == null ? `${heel(van[i])} of meer` : `${heel(van[i])}–${heel(tot[i])}`}</span>`;
+  }).join("");
+  const onder = modus === "heen" ? (B.onderDrempel || {}) : {};
+  const nOnder = (onder.buitenGemeente || 0) + (onder.binnenGemeente || 0) + (intern?.onderDrempel || 0);
+  box.innerHTML = `<b>Verplaatsingen per dag</b> (gewogen, gemiddelde dag): ${stukken}` +
+    (modus === "heen" && intern
+      ? `<br><span style="display:inline-block;width:14px;height:14px;border-radius:50%;` +
+        `border:2px solid ${GEEL};background:${GEEL}2E;vertical-align:-3px"></span> ` +
+        `verkeer dat binnen ${GEBIEDNAAM} blijft; ringen en korte pijlen zijn de stromen ` +
+        `binnen het gebied (per ${intern.eenheid === "wijk" ? "wijk" : "postcodegebied (PC4)"}).`
+      : "") +
+    (nOnder ? `<br>${heel(nOnder)} stromen met minder dan ${NMIN} waarnemingen zijn niet getekend (#13).` : "");
+}
+
+/* Schakelaar uitgaand/inkomend, alleen als er iets inkomends te tekenen valt. */
+const kop = el.parentElement.querySelector(".sub");
+if (bezoek.length && kop) {
+  const knoppen = document.createElement("div");
+  knoppen.className = "knoppenrij";
+  knoppen.style.cssText = "display:flex;gap:6px;margin:6px 0 8px;flex-wrap:wrap";
+  [["heen", "Waar gaan bewoners heen"], ["bezoek", "Waar komen bezoekers vandaan"]].forEach(([m, t]) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = t; b.className = "keuzeknop";
+    b.style.cssText = "font:inherit;font-size:12.5px;padding:4px 10px;cursor:pointer;" +
+      "border:1px solid var(--asfalt);background:var(--wit);color:var(--asfalt)";
+    const zet = () => knoppen.querySelectorAll("button").forEach(x => {
+      const aan = x === b ? m === modus : x.dataset.m === modus;
+      x.setAttribute("aria-pressed", String(aan));
+      x.style.background = aan ? "var(--asfalt)" : "var(--wit)";
+      x.style.color = aan ? "var(--wit)" : "var(--asfalt)";
+    });
+    b.dataset.m = m;
+    b.addEventListener("click", () => { modus = m; zet(); passend(); teken(); });
+    knoppen.appendChild(b);
+    setTimeout(zet, 0);
+  });
+  kop.after(knoppen);
+}
+
+/* Passend maken op wat getekend wordt, maar nooit dichter dan zoom 13: zonder bestemmingen
+   boven de drempel is er alleen de herkomst, en dan zoomde de kaart in tot straatniveau
+   (rooktest, Hoek van Holland).
+   Per lezing apart: de herkomst van bezoekers ligt vaak verder weg dan de bestemmingen van
+   bewoners, en samen passend maken drukte het interne verkeer tot een stip. */
+function passend() {
+  const punten = [[hlat, hlon], ...(modus === "heen"
+    ? [...heen.map(b => [b.lat, b.lon]), ...(intern?.stromen || []).flatMap(s => [s.vanLatLon, s.naarLatLon])]
+    : bezoek.map(b => [b.lat, b.lon]))];
+  k.fitBounds(L.latLngBounds(punten).pad(.15), {maxZoom:13, animate:false});
+}
+k.on("zoomend", teken);
+passend();
+teken();
+setTimeout(() => { k.invalidateSize(); passend(); teken(); }, 0);
 
 const d = ODINW.bestemmingen.delen;
+/* Een deel onder de drempel (#87) heeft geen aandeel en geen n; "nvt" is de gemeente, waar
+   "elders in de gemeente" niet bestaat. Geen van beide als 0% tonen. */
+const deelWaarde = x => x.nvt ? "n.v.t." : x.share == null ? "–" : `${nl(x.share)}%`;
+const deelVoet = x => x.nvt ? "geen categorie op dit niveau"
+  : x.share == null ? `te weinig waarnemingen (&lt;${ODINW.drempel?.nMin ?? 20})` : `n=${x.n}`;
 const strip = document.getElementById("bestemmingStrip");
 if (strip) strip.innerHTML =
-  `<div class="cell"><div class="num">${nl(d.binnenWijk.share)}%</div>` +
-  `<div class="lbl">van de verplaatsingen blijft binnen de wijk</div><div class="src">n=${d.binnenWijk.n}</div></div>` +
-  `<div class="cell"><div class="num">${nl(d.binnenGemeente.share)}%</div>` +
-  `<div class="lbl">gaat naar elders in de gemeente</div><div class="src">n=${d.binnenGemeente.n}</div></div>` +
-  `<div class="cell"><div class="num">${nl(d.buitenGemeente.share)}%</div>` +
-  `<div class="lbl">gaat de gemeente uit — verspreid over ${ODINW.bestemmingen.aantalGemeentenBuiten} gemeenten, geen enkele ≥10 waarnemingen</div><div class="src">n=${d.buitenGemeente.n}</div></div>` +
-  `<div class="cell"><div class="num">${ODINW.gemAfstandKm.wijk.toLocaleString("nl-NL")} km</div>` +
-  `<div class="lbl">gem. afstand per verplaatsing (Rotterdam: ${ODINW.gemAfstandKm.rotterdam.toLocaleString("nl-NL")} km)</div><div class="src">gewogen</div></div>`;
+  tegelHtml(deelWaarde(d.binnenWijk), "van de verplaatsingen blijft binnen de wijk",
+    deelVoet(d.binnenWijk), "odin-bestemmingen/binnen-wijk") +
+  tegelHtml(deelWaarde(d.binnenGemeente), "gaat naar elders in de gemeente",
+    deelVoet(d.binnenGemeente), "odin-bestemmingen/binnen-gemeente") +
+  tegelHtml(deelWaarde(d.buitenGemeente),
+    `gaat de gemeente uit — verspreid over ${ODINW.bestemmingen.aantalGemeentenBuiten} ` +
+    /* De drempel uit de data en niet als getal in de tekst: hier stond "≥10" terwijl de
+       pipeline 20 hanteert (#127). En alleen "geen enkele" als dat zo is — een rayon noemt er
+       wel een paar, en toen stond er toch dat er geen enkele was. */
+    "gemeenten" + (ODINW.bestemmingen.topGemeentenBuiten.length
+      ? ` (op de kaart: de ${ODINW.bestemmingen.topGemeentenBuiten.length} met ` +
+        `≥${ODINW.drempel?.nMin ?? 20} waarnemingen)`
+      : `, geen enkele met ≥${ODINW.drempel?.nMin ?? 20} waarnemingen`),
+    deelVoet(d.buitenGemeente), "odin-bestemmingen/buiten-gemeente") +
+  tegelHtml(`${ODINW.gemAfstandKm.wijk.toLocaleString("nl-NL")} km`,
+    `gem. afstand per verplaatsing (Rotterdam: ${ODINW.gemAfstandKm.rotterdam.toLocaleString("nl-NL")} km)`,
+    "gewogen", "odin-bestemmingen/gem-afstand");
 const foot = document.getElementById("bestemmingFoot");
 if (foot) foot.textContent = "Bron: " + ODINW.bron + " · niveau: " + ODINW.niveau + ". " + ODINW.caveat;
 });
@@ -2432,19 +3240,21 @@ const eigenReeksen = () => [
   {label:GEBIEDLABEL, data:labels.map(l =>
      (ODINW.dagdelen.wijk.find(r => r.label === l) || {}).share ?? null),
    backgroundColor:GEEL, borderColor:ASFALT, borderWidth:1, maxBarThickness:44},
-  {label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
-   backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:44},
+  ...(gemeenteReeksAan() ? [{label:GEMEENTENAAM + " (gemeente)", data:labels.map(l => rdam[l] ?? null),
+   backgroundColor:SCHIE, borderColor:ASFALT, borderWidth:1, maxBarThickness:44}] : []),
 ];
 const gDagdeel = new Chart(chDagdeel, {type:"bar",
   data:{labels, datasets:eigenReeksen()},
   options:{maintainAspectRatio:false,
     plugins:{legend:{position:"bottom"},
       tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${nl(c.parsed.y)}%`}}},
-    scales:{y:{grid:gridOpt, ticks:{callback:v=>v+"%"}}, x:{grid:{display:false}}}}});
+    scales:{y:{grid:gridOpt, beginAtZero:true, ticks:{callback:v=>v+"%"}}, x:{grid:{display:false}}}}});
 bijRefWijziging("dagdelen", () => {
   gDagdeel.data.datasets = [...eigenReeksen(),
     ...refDatasets("odin.dagdelen", labels, {maxBarThickness:22, zonder:[GEMEENTECODE]})];
   gDagdeel.update();
+  zetNiveauBadge("odin-dagdelen", [GEBIEDNIVEAU, ...(gemeenteReeksAan() ? ["gemeente"] : []),
+    ...refReeksen("odin.dagdelen", labels, {zonder:[GEMEENTECODE]}).map(r => r.niveau)]);
 });
 });
 
@@ -2457,15 +3267,20 @@ if (!strip) return;
 const topM = b.motieven.slice(0, 3);
 const herkomst = b.topHerkomst;
 strip.innerHTML =
-  `<div class="cell"><div class="num">${b.n}</div>` +
-  `<div class="lbl">verplaatsingen van niet-bewoners mét bestemming in de wijk (steekproef)</div><div class="src">ODiN gepoold</div></div>` +
-  topM.map(m => `<div class="cell"><div class="num">${nl(m.share)}%</div>` +
-    `<div class="lbl">motief: ${m.label.toLowerCase()}</div><div class="src">n=${m.n}</div></div>`).join("") +
-  (herkomst.length ? `<div class="cell"><div class="num">${nl(herkomst[0].share)}%</div>` +
-    `<div class="lbl">komt uit ${herkomst[0].gemeente}` +
-    (herkomst.length > 1 ? `; daarna ${herkomst.slice(1).map(h =>
-      `${h.gemeente} (${nl(h.share)}%)`).join(", ")}` : "") +
-    `</div><div class="src">n=${herkomst.map(h => h.n).join("/")}</div></div>` : "");
+  tegelHtml(b.n,
+    "verplaatsingen van niet-bewoners mét bestemming in de wijk (steekproef)",
+    "ODiN gepoold", "odin-bezoekers/aantal") +
+  /* Sleutel uit het motieflabel en niet uit de positie: de top-3 staat per gebied in een
+     andere volgorde, en dan zou opmerking nummer twee van gebied tot gebied verspringen. */
+  topM.map(m => tegelHtml(`${nl(m.share)}%`, `motief: ${m.label.toLowerCase()}`, `n=${m.n}`,
+    `odin-bezoekers/motief-${sleutelbaar(m.label)}`)).join("") +
+  (herkomst.length
+    ? tegelHtml(`${nl(herkomst[0].share)}%`,
+        `komt uit ${herkomst[0].gemeente}` +
+        (herkomst.length > 1 ? `; daarna ${herkomst.slice(1).map(h =>
+          `${h.gemeente} (${nl(h.share)}%)`).join(", ")}` : ""),
+        `n=${herkomst.map(h => h.n).join("/")}`, "odin-bezoekers/herkomst")
+    : "");
 });
 
 veilig("voorz-vergelijk", () => {
@@ -2487,7 +3302,7 @@ new Chart(chVoorz, {type:"bar",
         const abs = c.datasetIndex === 0 ? v[cat].wijkAantal : v[cat].gemeenteAantal;
         return ` ${c.dataset.label}: ${nl(c.parsed.x)} per 1.000 inwoners (${abs.toLocaleString("nl-NL")} locaties)`;
       }}}},
-    scales:{x:{grid:gridOpt, title:{display:true,text:"locaties per 1.000 inwoners"}}, y:{grid:{display:false}}}}});
+    scales:{x:{grid:gridOpt, beginAtZero:true, title:{display:true,text:"locaties per 1.000 inwoners"}}, y:{grid:{display:false}}}}});
 const foot = document.getElementById("voorzVergelijkFoot");
 if (foot) foot.textContent = "Bron: " + VOORZ.vergelijk.bron + ". " + VOORZ.vergelijk.caveat;
 });
@@ -2503,20 +3318,22 @@ const o = INFRA.omrijfactor;
 /* Een gebied zonder snelweg — Rotterdam Centrum, Noord, Delfshaven — heeft geen omrijfactor:
    die maat ís het effect van de barrière. Dan die twee tegels weglaten in plaats van een
    streepje tonen, want een streepje leest als "onbekend" en dit is "niet van toepassing". */
-const tegel = (num, lbl, src) =>
-  `<div class="cell"><div class="num">${num}</div><div class="lbl">${lbl}</div>` +
-  `<div class="src">${src}</div></div>`;
+const tegel = (num, lbl, src, sleutel) =>
+  tegelHtml(num, lbl, src, `infra-strip/${sleutel}`);
 let cellen =
   tegel(`${INFRA.kmVrijliggendFietspad.toLocaleString("nl-NL")} km`,
-        `vrijliggend fietspad binnen ${GEBIEDNAAM}`, `OSM ${INFRA.peildatum}`) +
+        `vrijliggend fietspad binnen ${GEBIEDNAAM}`, `OSM ${INFRA.peildatum}`, "fietspad-km") +
   tegel(INFRA.snelwegKruisingenFiets,
         heeftSnelweg ? `fietskruisingen (over/onder) met de ${refs}`
-                     : "fietskruisingen met een snelweg — geen snelweg in dit gebied", "OSM");
+                     : "fietskruisingen met een snelweg — geen snelweg in dit gebied", "OSM",
+        "fietskruisingen");
 if (o.kruisendSnelweg.mediaan != null) {
   cellen += tegel(`${o.kruisendSnelweg.mediaan.toLocaleString("nl-NL")}×`,
-    `mediane omrijfactor fiets, ${refs} kruisend (n=${o.kruisendSnelweg.n})`, "OSM-netwerk") +
+    `mediane omrijfactor fiets, ${refs} kruisend (n=${o.kruisendSnelweg.n})`, "OSM-netwerk",
+    "omrijfactor-kruisend") +
     tegel(`${o.zelfdeZijde.mediaan != null ? o.zelfdeZijde.mediaan.toLocaleString("nl-NL") : "—"}×`,
-      `idem, zelfde zijde (n=${o.zelfdeZijde.n}) — referentie`, "OSM-netwerk");
+      `idem, zelfde zijde (n=${o.zelfdeZijde.n}) — referentie`, "OSM-netwerk",
+      "omrijfactor-zelfde-zijde");
 }
 strip.innerHTML = cellen;
 const foot = document.getElementById("infraFoot");
@@ -2606,7 +3423,8 @@ if (luchtToggle && luchtStof && luchtLegenda) {
       inhoud = (g == null)
         ? "Geen waarde op deze plek."
         : `<b>${label}</b> hier: ${Number(g).toLocaleString("nl-NL", {maximumFractionDigits:1})} µg/m³` +
-          `<br><i>RIVM/NSL jaargemiddelde ${luchtPeiljaar ?? ""}</i>`;
+          `<br><i>RIVM/NSL jaargemiddelde ${luchtPeiljaar ?? ""}</i>` +
+          normtoets(luchtStof.value.includes("NO2") ? "lucht_no2" : "lucht_pm25", Number(g));
     } catch (err) {
       inhoud = "Waarde niet opgehaald (RIVM niet bereikbaar?).";
     }
@@ -2828,16 +3646,16 @@ function bijwerkStrip() {
   const per = !jr.length ? "geen jaar gekozen"
     : jr.length === 1 ? String(jr[0]) : `${jr[0]}–${jr[jr.length - 1]}`;
   strip.innerHTML =
-    `<div class="cell"><div class="num">${tel("Dodelijk")}</div>` +
-    `<div class="lbl">dodelijke ongevallen (${per})</div><div class="src">BRON/RWS</div></div>` +
-    `<div class="cell"><div class="num">${tel("Letsel").toLocaleString("nl-NL")}</div>` +
-    `<div class="lbl">letselongevallen (${per})</div><div class="src">BRON/RWS</div></div>` +
-    `<div class="cell"><div class="num">${kwetsbaar.toLocaleString("nl-NL")}</div>` +
-    '<div class="lbl">met fietser of voetganger als geregistreerde partij — alleen ' +
-    'vastgelegd bij letsel en dodelijk</div><div class="src">BRON/RWS</div></div>' +
-    `<div class="cell"><div class="num">${totaal.toLocaleString("nl-NL")}</div>` +
-    '<div class="lbl">geregistreerde ongevallen totaal, incl. uitsluitend materiële ' +
-    'schade</div><div class="src">BRON/RWS</div></div>';
+    tegelHtml(tel("Dodelijk"), `dodelijke ongevallen (${per})`, "BRON/RWS",
+      "kaart-ongevallen/dodelijk") +
+    tegelHtml(tel("Letsel").toLocaleString("nl-NL"), `letselongevallen (${per})`, "BRON/RWS",
+      "kaart-ongevallen/letsel") +
+    tegelHtml(kwetsbaar.toLocaleString("nl-NL"),
+      "met fietser of voetganger als geregistreerde partij — alleen vastgelegd bij letsel " +
+      "en dodelijk", "BRON/RWS", "kaart-ongevallen/kwetsbaar") +
+    tegelHtml(totaal.toLocaleString("nl-NL"),
+      "geregistreerde ongevallen totaal, incl. uitsluitend materiële schade", "BRON/RWS",
+      "kaart-ongevallen/totaal");
 }
 
 function hertekenKaart() {
@@ -2939,7 +3757,7 @@ const lijst = uitGeo.length
   ? uitGeo
   : (D.buurten || []).map(b => ({naam: b.n, tag: b.t, meer: b.m}));
 lijst.sort((a, b) => (b.inwoners ?? 0) - (a.inwoners ?? 0));
-lijst.forEach(b => {
+const maakBuurt = b => {
   const r = redactie[b.naam] || {};
   const tag = r.tag || b.tag ||
     (b.inwoners != null ? `${getalNL(b.inwoners)} inwoners` : "");
@@ -2954,8 +3772,96 @@ lijst.forEach(b => {
   el.addEventListener("keydown", e => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); t(); }
   });
-  bc.appendChild(el);
-});
+  return el;
+};
+
+/* Bij een rayon of de gemeente eerst de gebieden, en de buurten pas na een klik (#135).
+   Negentien buurtkaarten naast elkaar zijn een lijst, geen overzicht; de eenheid waarvoor een
+   gebiedsplan geschreven wordt, is het gebied (#45). De buurtcode draagt de wijk
+   (BU0599·04·51 → WK0599·04), dus de indeling komt uit GEO zelf. Alle buurtkaarten worden wel
+   gebouwd, verborgen per gebied, zodat de rooktest nog steeds elke buurt terugvindt. */
+const perGebiedModus = (GEBIEDNIVEAU === "rayon" || GEBIEDNIVEAU === "gemeente") && uitGeo.length;
+if (!perGebiedModus) {
+  lijst.forEach(b => bc.appendChild(maakBuurt(b)));
+} else {
+  const wijkVan = code => "WK" + String(code).slice(2, 8);
+  const naamVan = {}, rayonVan = {};
+  (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.rayons || [] : []).forEach(r =>
+    (r.gebieden || []).forEach(g => { naamVan[g.code] = g.naam; rayonVan[g.code] = r.naam; }));
+  (typeof GEBIEDEN !== "undefined" ? GEBIEDEN.buitenGebiedsindeling?.gebieden || [] : [])
+    .forEach(g => { naamVan[g.code] = g.naam; });
+  const groepen = {};
+  GEO.features.forEach(f => {
+    const w = wijkVan(f.properties.code);
+    (groepen[w] = groepen[w] || []).push({naam: f.properties.naam, inwoners: f.properties.inwoners});
+  });
+  const totaal = Object.values(groepen).flat().reduce((n, b) => n + (b.inwoners || 0), 0);
+  const gebieden = Object.entries(groepen).map(([code, bs]) => ({
+    code, naam: naamVan[code] || code, rayon: rayonVan[code] || "buiten de rayonindeling",
+    buurten: bs.sort((a, b) => (b.inwoners ?? 0) - (a.inwoners ?? 0)),
+    inwoners: bs.reduce((n, b) => n + (b.inwoners || 0), 0),
+  })).sort((a, b) => b.inwoners - a.inwoners);
+
+  bc.classList.add("gebieden");
+  const detail = document.createElement("div");
+  detail.className = "gebieddetail";
+  detail.hidden = true;
+  const panelen = {};
+  gebieden.forEach(g => {
+    const kaart = document.createElement("div");
+    kaart.className = "gebiedkaart"; kaart.tabIndex = 0; kaart.setAttribute("role", "button");
+    kaart.setAttribute("aria-expanded", "false");
+    kaart.dataset.gebied = g.code;
+    const aandeel = totaal ? Math.round(1000 * g.inwoners / totaal) / 10 : null;
+    kaart.innerHTML = `<div class="naam">${g.naam}</div>` +
+      `<div class="tag">${GEBIEDNIVEAU === "gemeente" ? g.rayon : "gebied"}</div>` +
+      `<div class="cijfers"><b>${getalNL(g.inwoners)}</b> inwoners · ${g.buurten.length} ` +
+      `buurt${g.buurten.length === 1 ? "" : "en"}` +
+      (aandeel != null ? ` · ${getalNL(aandeel)}% van ${GEBIEDNAAM}` : "") + "</div>";
+    bc.appendChild(kaart);
+
+    const paneel = document.createElement("div");
+    paneel.hidden = true;
+    const grootste = g.buurten[0];
+    paneel.innerHTML = `<h4>${g.naam} <span class="status niveau">gebied</span></h4>` +
+      `<div class="sub">${getalNL(g.inwoners)} inwoners in ${g.buurten.length} ` +
+      `buurt${g.buurten.length === 1 ? "" : "en"}` +
+      (aandeel != null ? `, ${getalNL(aandeel)}% van de inwoners van ${GEBIEDNAAM}` : "") +
+      (grootste && g.buurten.length > 1
+        ? `. Grootste buurt: ${grootste.naam} (${getalNL(grootste.inwoners)}).` : ".") +
+      ` <a href="#gebied=${g.code}" data-naar-gebied="${g.code}">Naar de gebiedspagina →</a></div>`;
+    const lijstEl = document.createElement("div");
+    lijstEl.className = "buurten";
+    g.buurten.forEach(b => lijstEl.appendChild(maakBuurt(b)));
+    paneel.appendChild(lijstEl);
+    /* De hash alleen zetten is niet genoeg: de databestanden zijn globale consts en laten zich
+       niet overschrijven, dus een gebiedswissel is een herlaadbeurt (zie gebiedsselectie). */
+    paneel.querySelector("[data-naar-gebied]").addEventListener("click", e => {
+      e.preventDefault();
+      location.hash = `gebied=${g.code}`;
+      location.reload();
+    });
+    detail.appendChild(paneel);
+    panelen[g.code] = paneel;
+
+    const kies = () => {
+      const open = !paneel.hidden;
+      Object.values(panelen).forEach(pn => { pn.hidden = true; });
+      bc.querySelectorAll(".gebiedkaart").forEach(k => {
+        k.classList.remove("open"); k.setAttribute("aria-expanded", "false"); });
+      if (!open) {
+        paneel.hidden = false;
+        kaart.classList.add("open"); kaart.setAttribute("aria-expanded", "true");
+      }
+      detail.hidden = open;
+    };
+    kaart.addEventListener("click", kies);
+    kaart.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); kies(); }
+    });
+  });
+  bc.after(detail);
+}
 /* Hoeveel buurten hóórden er te zijn? De rooktest rekende af op minimaal drie kaarten, en
    Pernis heeft er één — dan faalt een test op iets wat klopt, en een test die vals alarm geeft
    leert je hem negeren. Met dit getal kan de rooktest toetsen wat hij bedoelde: heeft elke
@@ -2989,6 +3895,9 @@ if (!tb) return;
 const STIJL = {
   verwerkt:    ["cbs", "verwerkt"],
   deels:       ["schatting", "deels"],
+  /* Eigen kleur: een cijfer uit een niet-openbare levering is verwerkt, maar niet door een
+     derde na te rekenen. Dat onderscheid moet zichtbaar blijven. */
+  intern:      ["intern", "niet-openbare bron"],
   gepland:     ["schatting", "gepland"],
   onderzoek:   ["schatting", "onderzoek"],
   geblokkeerd: ["ontbreekt", "geblokkeerd"],
@@ -3015,14 +3924,19 @@ GEBIEDEN.elementen.forEach(e => {
 const intro = document.getElementById("datastatusIntro");
 if (intro) {
   const n = GEBIEDEN.elementen.length;
-  const klaar = (telling.verwerkt || 0) + (telling.deels || 0);
+  const klaar = (telling.verwerkt || 0) + (telling.deels || 0) + (telling.intern || 0);
   intro.innerHTML =
     `${n} data-elementen in beeld, waarvan <b>${klaar} verwerkt</b>. De rest staat er ` +
     "bewust leeg bij: " +
     [[telling.gepland, "gepland"], [telling.onderzoek, "eerst uitzoeken of het kan"],
      [telling.geblokkeerd, "geblokkeerd, bron niet beschikbaar"]]
       .filter(([n]) => n).map(([n, w]) => `${n} ${w}`).join(", ") +
-    ". Zo is zichtbaar wat er mist in plaats van dat het onzichtbaar afwezig is.";
+    ". Zo is zichtbaar wat er mist in plaats van dat het onzichtbaar afwezig is." +
+    (telling.intern
+      ? ` Van de verwerkte elementen komen er <b>${telling.intern}</b> uit een ` +
+        "niet-openbare levering: daarvan staan alleen geaggregeerde uitkomsten in het " +
+        "dashboard, en een derde kan ze niet narekenen."
+      : "");
 }
 const foot = document.getElementById("datastatusFoot");
 if (foot) foot.textContent =
@@ -3039,11 +3953,14 @@ if (foot) foot.textContent =
 const WACHT = {gepland: "gepland", onderzoek: "uitzoeken"};
 const slots = GEBIEDEN.elementen.filter(e => e.sectie && WACHT[e.status]);
 for (const e of slots) {
-  const sec = document.getElementById(e.sectie);
+  const sec = plekVoor(e.sectie);
   if (!sec) { console.warn(`[slot] sectie ${e.sectie} bestaat niet voor ${e.naam}`); continue; }
   const box = document.createElement("div");
   box.className = "chart-box leeg";
   box.dataset.slot = e.status;
+  /* Ook een kaart die er nog niet is verdient een anker: juist hier kan een adviseur kwijt
+     of hij dit nodig heeft of dat het kan vervallen (zie js/review.js). */
+  box.dataset.onderwerp = "slot/" + sleutelbaar(e.naam);
   box.innerHTML =
     `<h4>${e.naam} <span class="status ontbreekt">${WACHT[e.status]}</span></h4>` +
     `<div class="sub">${e.toelichting || "Nog niet in het dashboard."}</div>` +
@@ -3061,6 +3978,623 @@ stijl.textContent =
   ".chart-box.leeg{border-style:dashed;background:transparent;opacity:.66}" +
   ".chart-box.leeg h4{font-weight:600}";
 document.head.appendChild(stijl);
+});
+
+
+/* ---------- gedeeld door de blokken uit niet-openbare leveringen ----------
+   `INTERN` komt uit data/<gebied>/intern.js en bevat per bron een blok met de cijfers én de
+   verantwoording. Die verantwoording is niet optioneel: bij een bron die niemand anders
+   heeft, is de enige controle op een cijfer de tekst eronder. */
+/* getalNL bestaat al bovenin; voor hele aantallen ronden we eerst af, want een schatting uit
+   grootteklassen levert halve personen op en "1.142,5 werkzame personen" is schijnprecisie. */
+const heelNL = v => v == null ? "onbekend" : Math.round(v).toLocaleString("nl-NL");
+
+const internBron = sleutel =>
+  (typeof INTERN !== "undefined" && INTERN.bronnen && !(INTERN.bronnen[sleutel] || {}).leeg)
+    ? INTERN.bronnen[sleutel] : null;
+
+/* De voetnoot van zo'n blok: bron, peiljaar, niveau, caveat, drempel en — als hij niet
+   openbaar is — dat het cijfer niet door een derde na te rekenen valt. */
+function internFoot(b, extra) {
+  const delen = [`Bron: ${b.bron}`];
+  if (b.niveau) delen.push(`niveau: ${b.niveau}`);
+  const regel = delen.join(" · ") + ". " + (extra ? extra + " " : "") + (b.caveat || "");
+  const staart = b.openbaar
+    ? " Reguliere publicatie; hier als levering ingelezen."
+    : " Niet-openbare levering: alleen geaggregeerde uitkomsten staan in dit dashboard, " +
+      "en een derde kan dit cijfer niet narekenen. Voorwaarden: " + b.voorwaarden;
+  /* Een drempel van 1 is geen drempel; die zin erbij zetten maakt de voetnoot langer en de
+     lezer niet wijzer. */
+  const drempel = (b.drempel && b.drempel.nMin > 1) ? " " + b.drempel.toelichting : "";
+  return regel + staart + drempel;
+}
+
+/* Stippellijn op een vaste waarde, voor grafieken met een referentiepunt (Rotterdam = de
+   stedelijke score). Kleiner broertje van wijkLijn, dat aan chBuurt vastzit. */
+function refLijnPlugin(as) {
+  return {
+    id: "refLijn" + as, waarde: null, label: "",
+    afterDatasetsDraw(chart) {
+      const p = chart.$refLijn;
+      if (!p || p.waarde == null) return;
+      const schaal = chart.scales[as];
+      const {ctx, chartArea: a} = chart;
+      const px = schaal.getPixelForValue(p.waarde);
+      if (px < (as === "x" ? a.left : a.top) || px > (as === "x" ? a.right : a.bottom)) return;
+      ctx.save();
+      ctx.strokeStyle = SCHIE; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (as === "x") { ctx.moveTo(px, a.top); ctx.lineTo(px, a.bottom); }
+      else { ctx.moveTo(a.left, px); ctx.lineTo(a.right, px); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "700 11px Helvetica"; ctx.fillStyle = SCHIE;
+      const b = ctx.measureText(p.label).width;
+      /* Een dekkend plaatje achter de tekst: de lijn loopt over de balken heen en zonder
+         achtergrond is het label daar onleesbaar. */
+      const lx = as === "x" ? Math.min(px + 4, a.right - b - 2) : a.left + 4;
+      const ly = as === "x" ? a.top + 11 : Math.max(px - 4, a.top + 11);
+      ctx.fillStyle = "rgba(250,250,245,.85)";
+      ctx.fillRect(lx - 2, ly - 10, b + 4, 13);
+      ctx.fillStyle = SCHIE;
+      ctx.fillText(p.label, lx, ly);
+      ctx.restore();
+    },
+  };
+}
+
+
+veilig("wijkprofiel", () => {
+/* ---------- wijkprofiel: de drie hoofdscores over zeven peiljaren ----------
+   Hoort in sectie 02 omdat het dezelfde vraag beantwoordt: binnen één gebied verschillen de
+   wijken meer dan de gebieden onderling. En omdat het wijkprofiel géén rayonscore kent —
+   een indexscore middelen over gebieden is geen geldige bewerking — is dit precies het
+   soort cijfer waar "één rayongemiddelde bestaat niet" letterlijk voor geldt.
+
+   Let op de dubbele betekenis van "wijk": de 71 wijken hieronder zijn de Rotterdamse
+   wijkindeling, niet de CBS-wijk waar de rest van dit dashboard op draait. */
+const b = internBron("wijkprofiel");
+const box = document.getElementById("wijkprofielBox");
+if (!b || !box || !b.indices) return;
+
+const KEUZE = [["SI", "Sociaal"], ["FI", "Fysiek"], ["VI", "Veiligheid"]];
+let gekozen = "SI";
+
+const jaren = b.peiljaren.map(String);
+const gebiedCodes = Object.keys(b.indices.SI.perGebied);
+const meerdere = gebiedCodes.length > 1;
+
+const grafiek = new Chart(document.getElementById("chWijkprofiel"), {
+  type: "line",
+  data: {labels: jaren, datasets: []},
+  options: {maintainAspectRatio: false, spanGaps: true,
+    plugins: {legend: {display: true, position: "bottom"},
+      tooltip: {callbacks: {label: c => ` ${c.dataset.label}: ${c.parsed.y ?? "geen score"}`}}},
+    scales: {y: {grid: gridOpt, title: {display: true, text: "indexscore"}},
+             x: {grid: {display: false}}}},
+});
+
+const wijkenGrafiek = new Chart(document.getElementById("chWijkprofielWijken"), {
+  type: "bar",
+  data: {labels: [], datasets: [{data: [], backgroundColor: SCHIE, borderColor: ASFALT,
+    borderWidth: 1, maxBarThickness: 26}]},
+  options: {indexAxis: "y", maintainAspectRatio: false,
+    plugins: {legend: {display: false},
+      tooltip: {callbacks: {label: c => ` ${c.parsed.x ?? "geen score"}`}}},
+    scales: {x: {grid: gridOpt, beginAtZero: true, title: {display: true, text: "indexscore"}},
+             y: {grid: {display: false}}}},
+  plugins: [refLijnPlugin("x")],
+});
+
+function teken() {
+  const idx = b.indices[gekozen];
+  const kleuren = [ASFALT, SCHIE, POLDER, GEEL, "#B0452F", GRIJS];
+  grafiek.data.datasets = gebiedCodes.map((code, i) => ({
+    label: (GEBIEDEN.gemeente.wijken && meerdere)
+      ? (naamVanCode(code) || code) : GEBIEDNAAM,
+    data: idx.perGebied[code],
+    borderColor: kleuren[i % kleuren.length],
+    backgroundColor: kleuren[i % kleuren.length],
+    tension: .25, pointRadius: 3,
+  })).concat([{
+    label: GEMEENTENAAM, data: idx.rotterdam, borderColor: GRIJS, backgroundColor: GRIJS,
+    borderDash: [5, 4], tension: .25, pointRadius: 2,
+  }]);
+  grafiek.update();
+
+  const nieuwste = b.peiljaren.at(-1);
+  const rij = b.wijken
+    .map(w => ({naam: w.naam, v: w[gekozen]}))
+    .filter(w => typeof w.v === "number")
+    .sort((a, c) => c.v - a.v);
+  wijkenGrafiek.data.labels = rij.map(w => w.naam);
+  wijkenGrafiek.data.datasets[0].data = rij.map(w => w.v);
+  wijkenGrafiek.$refLijn = {waarde: idx.rotterdam.at(-1), label: GEMEENTENAAM};
+  /* Hoogte meegroeien met het aantal wijken: een rayon heeft er tot negentien, en in een vak
+     van 230 px slaat Chart.js dan labels over — dan staat er een balk zonder naam. */
+  wijkenGrafiek.canvas.parentNode.style.height = (44 + 22 * rij.length) + "px";
+  wijkenGrafiek.resize();
+  wijkenGrafiek.update();
+
+  const eigen = meerdere ? null : idx.perGebied[gebiedCodes[0]].at(-1);
+  document.getElementById("wijkprofielSub").textContent =
+    `${idx.naam} per peiljaar. 100 is het Rotterdams gemiddelde van het ijkjaar; ` +
+    `${GEMEENTENAAM} staat in ${nieuwste} op ${getalNL(idx.rotterdam.at(-1))}` +
+    (eigen != null ? `, ${GEBIEDNAAM} op ${getalNL(eigen)}` : "") + ". " +
+    (meerdere
+      ? "Een rayonscore bestaat niet: het wijkprofiel publiceert per gebied, en indexscores " +
+        "zijn niet te middelen. Daarom een lijn per gebied."
+      : "");
+  document.getElementById("wijkprofielWijkKop").textContent =
+    `Rotterdamse wijken binnen dit gebied, ${nieuwste}`;
+}
+
+function naamVanCode(code) {
+  for (const r of (GEBIEDEN.rayons || [])) {
+    const g = r.gebieden.find(x => x.code === code);
+    if (g) return g.naam;
+  }
+  return null;
+}
+
+const tg = document.getElementById("wijkprofielToggle");
+KEUZE.forEach(([k, label], i) => {
+  const knop = document.createElement("button");
+  knop.type = "button"; knop.textContent = label; knop.dataset.k = k;
+  if (i === 0) knop.classList.add("actief");
+  knop.addEventListener("click", () => {
+    gekozen = k;
+    [...tg.children].forEach(x => x.classList.toggle("actief", x.dataset.k === k));
+    teken();
+  });
+  tg.appendChild(knop);
+});
+
+teken();
+document.getElementById("wijkprofielFoot").textContent = internFoot(b, b.wijkToelichting);
+box.hidden = false;
+});
+
+
+veilig("arbeidsplaatsen", () => {
+/* ---------- vestigingen en werkzame personen ----------
+   Geen arbeidsplaatsentelling, en dat moet de lezer meteen zien. De levering bevat alleen
+   vestigingen met vijf of meer werkenden, in grootteklassen; het aantal werkzame personen is
+   dus een ondergrens. De sectorverdeling is robuuster dan het niveau, en die staat daarom in
+   de grafiek — het absolute getal alleen in de strip, met "ten minste" ervoor. */
+const b = internBron("arbeidsplaatsen");
+const box = document.getElementById("werkBox");
+if (!b || !box || !b.sectoren) return;
+
+document.getElementById("werkStrip").innerHTML =
+  tegelHtml(heelNL(b.vestigingen), "vestigingen met 5 of meer werkenden",
+    "KVK, levering gemeente", "arbeidsplaatsen/vestigingen") +
+  tegelHtml(`≥ ${heelNL(b.werkzamePersonen)}`,
+    "werkzame personen, geschat uit grootteklassen", "ondergrens",
+    "arbeidsplaatsen/werkzame-personen");
+
+const rij = b.sectoren.filter(s => s.vestigingen > 0);
+const canvasWerk = document.getElementById("chWerk");
+/* Eenentwintig SBI-secties passen niet in een vak van vaste hoogte; Chart.js slaat dan
+   labels over en er staat een balk zonder naam. */
+canvasWerk.parentNode.style.height = (44 + 22 * rij.length) + "px";
+new Chart(canvasWerk, {
+  type: "bar",
+  data: {labels: rij.map(s => s.naam),
+    datasets: [{data: rij.map(s => s.werkzaam), backgroundColor: SCHIE,
+      borderColor: ASFALT, borderWidth: 1, maxBarThickness: 22}]},
+  options: {indexAxis: "y", maintainAspectRatio: false,
+    plugins: {legend: {display: false},
+      tooltip: {callbacks: {label: c => {
+        const s = rij[c.dataIndex];
+        return s.werkzaam == null
+          ? ` ${s.vestigingen} vestiging(en) — te weinig voor een schatting`
+          : ` ten minste ${heelNL(s.werkzaam)} werkzame personen in ${s.vestigingen} vestigingen`;
+      }}}},
+    scales: {x: {grid: gridOpt, beginAtZero: true,
+        title: {display: true, text: "werkzame personen (ondergrens)"}},
+      y: {grid: {display: false}}}},
+});
+
+const d = b.dekking || {};
+document.getElementById("werkSub").textContent =
+  `Werkzame personen per SBI-sectie, geschat uit de grootteklasse van elke vestiging. ` +
+  `Sectoren met minder dan ${b.drempel.nMin} vestigingen krijgen geen schatting.`;
+document.getElementById("werkFoot").textContent = internFoot(b,
+  `Van de ${heelNL(d.inLevering)} vestigingen in de levering konden er ${heelNL(d.zonderLocatie)} ` +
+  "niet op een pand worden gelokaliseerd; die tellen nergens mee.");
+box.hidden = false;
+});
+
+
+veilig("autobezit", () => {
+/* ---------- autobezit per woonadres, zeven peildata ----------
+   De noemer is het woonadres en niet het huishouden, dus dit cijfer is níet hetzelfde als
+   "auto's per huishouden" uit de CBS Kerncijfers een paar grafieken hierboven. Dat staat in
+   de voetnoot, want twee bijna-gelijke getallen naast elkaar zonder uitleg is erger dan één. */
+const b = internBron("autobezit");
+const box = document.getElementById("autobezitBox");
+if (!b || !box || !b.totaal) return;
+
+const jaren = b.peiljaren;
+const codes = Object.keys(b.perGebied || {});
+const meerdere = codes.length > 1;
+const kleuren = [ASFALT, SCHIE, POLDER, GEEL, "#B0452F", GRIJS];
+
+const reeksen = meerdere
+  ? codes.map((code, i) => ({label: b.perGebied[code].naam,
+      data: b.perGebied[code].perWoonadres, borderColor: kleuren[i % kleuren.length],
+      backgroundColor: kleuren[i % kleuren.length], tension: .25, pointRadius: 3}))
+  : [{label: GEBIEDNAAM, data: b.totaal.perWoonadres, borderColor: ASFALT,
+      backgroundColor: ASFALT, tension: .25, pointRadius: 3}];
+
+new Chart(document.getElementById("chAutobezit"), {
+  type: "line",
+  data: {labels: jaren, datasets: reeksen},
+  options: {maintainAspectRatio: false, spanGaps: true,
+    plugins: {legend: {display: meerdere, position: "bottom"},
+      tooltip: {callbacks: {label: c => ` ${c.dataset.label}: ${getalNL(c.parsed.y)}`}}},
+    /* Geen beginAtZero hier: dit is een lijn door de tijd, geen staaf. Het verschil tussen
+       gebieden zit in de tweede decimaal, en vanaf nul is dat een vlakke streep. Dezelfde
+       keuze als bij de bevolkingsreeks. */
+    scales: {y: {grid: gridOpt, title: {display: true, text: "personenauto's per woonadres"}},
+      x: {grid: {display: false}}}},
+});
+
+const KLEUR_KLASSE = {"0": POLDER, "1": SCHIE, "2": GEEL, "3": "#B0452F",
+  "4 of meer": ASFALT, "onbekend": "#B9B7A8"};
+const KLASSELABEL = k => k === "onbekend" ? "onbekend" : k + (k === "1" ? " auto" : " auto's");
+new Chart(document.getElementById("chAutobezitVerdeling"), {
+  type: "bar",
+  data: {labels: jaren,
+    datasets: b.klassen.map(k => ({label: KLASSELABEL(k),
+      data: b.totaal.verdeling[k], backgroundColor: KLEUR_KLASSE[k] || GRIJS,
+      borderColor: ASFALT, borderWidth: .5}))},
+  options: {maintainAspectRatio: false,
+    plugins: {legend: {display: true, position: "bottom"},
+      tooltip: pctTip(" % van de woonadressen")},
+    scales: {y: {stacked: true, grid: gridOpt, max: 100,
+        ticks: {callback: v => v + "%"}},
+      x: {stacked: true, grid: {display: false}}}},
+});
+
+/* Subbuurtkaart: fijner dan de CBS-buurt uit sectie 02, dus hij laat spreiding zien die daar
+   niet te zien is. Zelfde kleurcodering als de buurt-choropleth, zodat de twee kaarten niet
+   elk hun eigen taal spreken. */
+const waarden = b.subbuurten.map(s => s.perWoonadres).filter(v => v != null);
+const maxW = waarden.length ? Math.max(...waarden) : 0;
+const kaart = L.map("kaartAutobezit", {scrollWheelZoom: false});
+basiskaart().addTo(kaart);
+const laag = L.geoJSON(b.kaart, {
+  style: f => ({color: ASFALT, weight: 1, fillColor: SCHIE,
+    fillOpacity: f.properties.perWoonadres == null ? .12
+      : .15 + .65 * (f.properties.perWoonadres / (maxW || 1))}),
+  onEachFeature: (f, l) => {
+    const p = f.properties;
+    l.bindPopup(`<b>${p.naam}</b> (subbuurt ${p.code})<br>` +
+      (p.perWoonadres == null
+        ? "geen cijfer (onderdrukt of te klein)"
+        : `${getalNL(p.perWoonadres)} auto's per woonadres`));
+  },
+}).addTo(kaart);
+kaart.fitBounds(laag.getBounds(), {padding: [10, 10]});
+setTimeout(() => kaart.invalidateSize(), 0);
+if (maxW > 0) {
+  const blok = op => `<span style="display:inline-block;width:20px;height:12px;` +
+    `background:${SCHIE};opacity:${op.toFixed(2)};border:1px solid var(--grid);` +
+    `vertical-align:-2px"></span>`;
+  document.getElementById("autobezitLegenda").innerHTML =
+    "Auto's per woonadres: " +
+    [0, 1 / 3, 2 / 3, 1].map(t => `${blok(.15 + .65 * t)} ${getalNL(Math.round(t * maxW * 100) / 100)}`).join(" ") +
+    ` &nbsp;·&nbsp; ${blok(.12)} geen cijfer`;
+}
+
+const laatste = b.totaal.perWoonadres.at(-1);
+const nul = b.totaal.verdeling["0"].at(-1);
+const onvolledig = b.totaal.volledig.some(v => v === false);
+document.getElementById("autobezitSub").textContent =
+  `Peildatum 1 januari, ${jaren[0]} tot en met ${jaren.at(-1)}. In ${jaren.at(-1)} ` +
+  `${getalNL(laatste)} personenauto's per woonadres; ${getalNL(nul)}% van de woonadressen heeft ` +
+  "geen auto." + (meerdere ? " Bij een rayon één lijn per gebied." : "");
+document.getElementById("autobezitFoot").textContent = internFoot(b, onvolledig
+  ? "In ten minste één subbuurt is een cel onderdrukt; de opgetelde aantallen zijn daardoor " +
+    "een ondergrens en de percentages een benadering."
+  : "");
+box.hidden = false;
+});
+
+
+veilig("parkeersectoren", () => {
+/* ---------- parkeervergunningen per sector ----------
+   Bewust geen gebiedstotaal. Parkeersectoren overlappen elkaar en volgen de gebiedsgrens
+   niet, dus optellen zou dubbeltellen en een grens suggereren die er niet is. Wat er wél
+   staat: per sector de cijfers, met erbij hoeveel van die sector in dit gebied ligt. */
+const b = internBron("parkeersectoren");
+const box = document.getElementById("parkeerBox");
+if (!b || !box) return;
+if (!b.sectoren || !b.sectoren.length) {
+  document.getElementById("parkeerSub").textContent =
+    `Geen parkeersector ligt voor ${b.minOverlapPct}% of meer in ${GEBIEDNAAM}: hier geldt ` +
+    "geen vergunningregime, of de sector ligt vrijwel geheel buiten het gebied.";
+  document.getElementById("kaartParkeer").style.display = "none";
+  document.getElementById("parkeerDetails").style.display = "none";
+  document.getElementById("parkeerFoot").textContent = internFoot(b, b.geenTotaal);
+  box.hidden = false;
+  return;
+}
+
+/* Bezetting (#149): (vergunningen bewoners + bedrijven) ÷ fiscale capaciteit, uitgerekend in de
+   pipeline zodat de check daar dezelfde regel ziet. Kaart en tabel lezen allebei dat ene getal. */
+const bez = s => (s?.cijfers || {}).bezetting ?? null;
+const wacht = v => v == null ? "&lt; drempel" : heelNL(v);
+const kaart = L.map("kaartParkeer", {scrollWheelZoom: false});
+basiskaart().addTo(kaart);
+const opSector = Object.fromEntries(b.sectoren.map(s => [s.id, s]));
+const laag = L.geoJSON(b.kaart, {
+  style: f => {
+    const s = opSector[f.properties.id];
+    // Een sector die het gebied alleen raakt (#134): omtrek zonder vulling, geen cijfer.
+    if (!s) return {color: ASFALT, weight: 1, dashArray: "3 3", fill: false, opacity: .6};
+    // Eén tint, geen rood bij 100% (#30: normatieve kleuring is uitgesteld). De schaal loopt
+    // door tot 150%, want juist boven de 100% verschillen de sectoren onderling het meest.
+    const v = bez(s);
+    return {color: ASFALT, weight: 1, fillColor: SCHIE,
+      fillOpacity: v == null ? .05 : .08 + .72 * Math.min(v / 150, 1)};
+  },
+  onEachFeature: (f, l) => {
+    const s = opSector[f.properties.id];
+    if (!s) {
+      l.bindPopup(`<b>Parkeersector ${f.properties.id}</b><br>` +
+        `${getalNL(100 * f.properties.deel)}% van de sector ligt in ${GEBIEDNAAM}; ` +
+        `onder de ${b.minOverlapPct}% en daarom niet in de tabel.`);
+      return;
+    }
+    const c = s.cijfers || {};
+    l.bindPopup(`<b>Parkeersector ${s.id}</b><br>` +
+      `${getalNL(s.deelInGebied)}% van de sector ligt in ${GEBIEDNAAM}<br>` +
+      `vergunningen bewoners: ${heelNL(c.vergunningenBewoners)} (wachtlijst ${wacht(c.wachtlijstBewoners)})<br>` +
+      `vergunningen bedrijven: ${heelNL(c.vergunningenBedrijven)} (wachtlijst ${wacht(c.wachtlijstBedrijven)})<br>` +
+      `fiscale capaciteit: ${heelNL(c.capaciteit)}<br>` +
+      `bezetting door vergunningen: ${c.bezetting == null ? "onbekend" : getalNL(c.bezetting) + "%"}`);
+  },
+}).addTo(kaart);
+/* De gebiedsgrens erbij (#133): sectoren volgen de grens niet, dus zonder omtrek is niet te zien
+   welk deel van een sector in het gebied ligt. Passend maken op sectoren én grens samen. */
+let grenzen = laag.getBounds();
+if (typeof GEO !== "undefined" && GEO.features?.length) {
+  const grens = L.geoJSON({type: "FeatureCollection", features: GEO.features},
+    {style: {color: ASFALT, weight: 1.5, fill: false, dashArray: "4 3"}, interactive: false})
+    .addTo(kaart);
+  grenzen = grenzen.extend(grens.getBounds());
+}
+kaart.fitBounds(grenzen, {padding: [10, 10]});
+setTimeout(() => kaart.invalidateSize(), 0);
+const nRaakt = (b.kaart?.features || []).filter(f => !opSector[f.properties.id]).length;
+document.getElementById("parkeerLegenda").innerHTML =
+  `Kleurverloop: bezetting door vergunningen, ${b.bezettingRegel || "vergunningen ÷ capaciteit"}: ` +
+  `<span style="display:inline-block;width:90px;height:12px;vertical-align:-2px;` +
+  `border:1px solid var(--grid);background:linear-gradient(90deg,` +
+  `color-mix(in srgb,${SCHIE} 8%,transparent),color-mix(in srgb,${SCHIE} 80%,transparent))">` +
+  `</span> 0% tot 150% of meer.` +
+  (nRaakt ? ` Gestippelde omtrek: ${nRaakt} sector(en) die het gebied alleen raken.` : "");
+
+const tb = document.querySelector("#parkeerTabel tbody");
+for (const s of b.sectoren) {
+  const c = s.cijfers || {};
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    `<td>${s.id}</td>` +
+    `<td class="getal">${getalNL(s.deelInGebied)}%</td>` +
+    `<td class="getal rand">${heelNL(c.vergunningenBewoners)}</td>` +
+    `<td class="getal">${wacht(c.wachtlijstBewoners)}</td>` +
+    `<td class="getal">${heelNL(c.plafondBewoners)}</td>` +
+    `<td class="getal rand">${heelNL(c.vergunningenBedrijven)}</td>` +
+    `<td class="getal">${wacht(c.wachtlijstBedrijven)}</td>` +
+    `<td class="getal">${heelNL(c.plafondBedrijven)}</td>` +
+    `<td class="getal rand">${c.bezetting == null ? "—" : getalNL(c.bezetting) + "%"}</td>`;
+  tb.appendChild(tr);
+}
+document.getElementById("parkeerDetailsLabel").textContent =
+  `Alle ${b.sectoren.length} sectoren — vergunningen, wachtlijst en bezetting`;
+
+const metWacht = b.sectoren.filter(s => (s.cijfers || {}).wachtlijstBewoners > 0).length;
+const metWachtBed = b.sectoren.filter(s => (s.cijfers || {}).wachtlijstBedrijven > 0).length;
+const vol = b.sectoren.filter(s => bez(s) != null && bez(s) >= 100).length;
+document.getElementById("parkeerSub").textContent =
+  `${b.sectoren.length} parkeersector(en) liggen voor ${b.minOverlapPct}% of meer in ${GEBIEDNAAM}. ` +
+  `In ${metWacht} daarvan staan bewoners op een wachtlijst, in ${metWachtBed} bedrijven; ` +
+  `in ${vol} zijn meer vergunningen uitgegeven dan er fiscale plaatsen zijn. ` +
+  "De cijfers gelden voor de hele sector, ook het deel buiten dit gebied.";
+document.getElementById("parkeerFoot").textContent = internFoot(b,
+  `Bezetting = ${b.bezettingRegel || "(vergunningen bewoners + bedrijven) ÷ fiscale capaciteit"}. ` +
+  "Bewoners- en bedrijfsvergunningen tellen tegen dezelfde fiscale plaatsen; een bezetting " +
+  "boven 100% betekent meer vergunningen dan plaatsen, niet dat de straat vol staat — niet " +
+  "elke vergunninghouder parkeert tegelijk. Plafonds zijn de tijdelijke berekening uit de " +
+  "levering.");
+box.hidden = false;
+});
+
+
+veilig("viewers", () => {
+/* ---------- losse verkenners: naar de diepere analyse, zonder hem mee te slepen ----------
+   Naast dit dashboard bestaan er afzonderlijke producten die één vraag veel dieper
+   beantwoorden (parkeercapaciteit tot op het losse vak, invloedsgebieden per ov-halte). Die
+   staan in scripts/viewers.py en komen via data/index.js binnen — er staat hier bewust geen
+   lijst met URL's, net als bij de WMS-koppeling.
+
+   Waarom een tussenstap en niet meteen een iframe: één van die producten is één HTML-bestand
+   van 35 MB. Dat zou bij elke opening van het dashboard meeladen, ook voor wie er niet naar
+   kijkt, en het dashboard moet offline blijven werken. Het iframe wordt dus pas gebouwd als
+   iemand erop klikt. Openen in een nieuw tabblad kan altijd.
+
+   Vóór de sectienavigatie, zodat die de h4's van deze kaarten meeneemt in het zoekvak. */
+if (typeof GEBIEDEN === "undefined" || !Array.isArray(GEBIEDEN.viewers)) return;
+
+const vStijl = document.createElement("style");
+vStijl.textContent =
+  ".chart-box.viewer .knoppen{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:4px 0 10px}" +
+  ".chart-box.viewer button{font:inherit;font-size:12.5px;font-weight:700;cursor:pointer;" +
+  "padding:7px 13px;border:1px solid var(--asfalt);background:var(--asfalt);color:var(--wit)}" +
+  ".chart-box.viewer button:hover{background:var(--asfalt-zacht);border-color:var(--asfalt-zacht)}" +
+  /* #137: een verkenner is een ander, rijker product dan een grafiek, en moet er ook zo uitzien.
+     Volle breedte, een accentrand en een beeld van wat je krijgt. */
+  ".chart-box.viewer{border-left:6px solid var(--schie);background:#EEF3F5;padding:18px 20px}" +
+  ".chart-box.viewer .viewerlabel{font-size:11px;font-weight:800;letter-spacing:.14em;" +
+  "text-transform:uppercase;color:var(--schie);margin-bottom:4px}" +
+  ".chart-box.viewer h4{font-size:19px}" +
+  ".chart-box.viewer .viewergrid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);" +
+  "gap:20px;align-items:start;margin-top:8px}" +
+  "@media(max-width:820px){.chart-box.viewer .viewergrid{grid-template-columns:1fr}}" +
+  ".chart-box.viewer .viewerbeeld{position:relative;display:block;border:1px solid var(--asfalt);" +
+  "box-shadow:0 4px 14px rgba(34,38,31,.18);line-height:0}" +
+  ".chart-box.viewer .viewerbeeld img{width:100%;height:auto}" +
+  ".chart-box.viewer .viewerbeeld span{position:absolute;right:10px;bottom:10px;line-height:1.2;" +
+  "background:var(--asfalt);color:var(--wit);font-size:12.5px;font-weight:700;padding:6px 10px}" +
+  ".chart-box.viewer ul{margin:8px 0 12px 18px;font-size:13.5px}" +
+  ".chart-box.viewer li{margin:3px 0}" +
+  ".chart-box.viewer a.hoofdknop{display:inline-block;background:var(--schie);color:var(--wit);" +
+  "font-weight:800;font-size:14px;padding:10px 16px;text-decoration:none}" +
+  ".chart-box.viewer a.hoofdknop:hover{background:var(--asfalt)}" +
+  ".meer-details{font-size:13px;margin-top:10px;padding:7px 10px;background:#EEF3F5;" +
+  "border-left:4px solid var(--schie);color:var(--asfalt-zacht)}" +
+  ".meer-details a{font-weight:800}" +
+  ".chart-box.viewer iframe{width:100%;border:1px solid var(--grid);background:var(--beton)}" +
+  ".chart-box.viewer .selectie{font-size:12px;color:var(--asfalt-zacht)}" +
+  "@media print{.chart-box.viewer iframe,.chart-box.viewer .knoppen{display:none!important}}";
+document.head.appendChild(vStijl);
+
+for (const v of GEBIEDEN.viewers) {
+  const sec = plekVoor(v.sectie);
+  if (!sec) { console.warn(`[viewer] sectie ${v.sectie} bestaat niet voor ${v.naam}`); continue; }
+
+  /* De deeplink is per gebied in de pipeline uitgerekend. Is er geen, dan zeggen we dat —
+     stil terugvallen op de stadskaart zou suggereren dat je naar dit gebied kijkt. */
+  const link = (v.links || {})[GEBIEDCODE];
+  const doel = link ? link.url : v.url;
+
+  /* Geen .reveal: de IntersectionObserver in veilig("scroll") heeft de DOM al doorlopen
+     voordat dit blok draait, dus een .reveal die er later bij komt blijft op opacity 0. */
+  const box = document.createElement("div");
+  box.className = "chart-box viewer";
+  box.dataset.viewer = v.sleutel;
+  /* Ook een extern product is een onderwerp: "hier wil ik liever een eigen grafiek van" is
+     precies het soort oordeel waar de reviewronde om vraagt (js/review.js). */
+  box.dataset.onderwerp = "viewer/" + v.sleutel;
+  const label = document.createElement("div");
+  label.className = "viewerlabel";
+  label.textContent = "Verdieping · aparte verkenner";
+  box.appendChild(label);
+  const kop = document.createElement("h4");
+  kop.innerHTML = `${v.naam} <span class="status niveau">extern product</span>`;
+  box.appendChild(kop);
+
+  /* Links het beeld (klikbaar), rechts wat je er kunt en de knoppen. Zonder beeld in de
+     registry vult de tekstkolom de hele breedte. */
+  const grid = document.createElement("div");
+  grid.className = "viewergrid";
+  if (v.voorbeeld) {
+    const beeld = document.createElement("a");
+    beeld.className = "viewerbeeld";
+    beeld.href = doel; beeld.target = "_blank"; beeld.rel = "noopener noreferrer";
+    beeld.innerHTML = `<img src="${v.voorbeeld}" loading="lazy" ` +
+      `alt="Voorbeeld van de verkenner ${v.naam}"><span>Open de verkenner ↗</span>`;
+    /* Ontbreekt het bestand toch, dan geen gebroken plaatje maar geen beeld. */
+    beeld.querySelector("img").addEventListener("error", () => {
+      beeld.remove(); grid.style.gridTemplateColumns = "1fr";
+    }, {once: true});
+    grid.appendChild(beeld);
+  } else {
+    grid.style.gridTemplateColumns = "1fr";
+  }
+  const tekst = document.createElement("div");
+  grid.appendChild(tekst);
+  box.appendChild(grid);
+
+  const sub = document.createElement("div");
+  sub.className = "sub";
+  sub.textContent = v.omschrijving;
+  tekst.appendChild(sub);
+  if ((v.kunnen || []).length) {
+    const intro = document.createElement("div");
+    intro.className = "sub";
+    intro.style.marginBottom = "0";
+    intro.innerHTML = "<b>Wat je er kunt:</b>";
+    const ul = document.createElement("ul");
+    ul.innerHTML = v.kunnen.map(k => `<li>${k}</li>`).join("");
+    tekst.appendChild(intro);
+    tekst.appendChild(ul);
+  }
+
+  const knoppen = document.createElement("div");
+  knoppen.className = "knoppen";
+  if (v.modus === "facade") {
+    const knop = document.createElement("button");
+    knop.type = "button";
+    knop.textContent = "Verkenner laden op deze pagina";
+    knop.addEventListener("click", () => {
+      const frame = document.createElement("iframe");
+      frame.src = doel;
+      frame.height = v.hoogte || 600;
+      frame.loading = "lazy";
+      frame.referrerPolicy = "no-referrer";
+      frame.title = v.naam;
+      knop.remove();
+      /* Onder het raster, over de volle breedte: in de tekstkolom zou hij een derde smal zijn. */
+      box.insertBefore(frame, grid.nextSibling);
+    }, {once: true});
+    knoppen.appendChild(knop);
+  }
+  const extern = document.createElement("a");
+  extern.className = "hoofdknop";
+  extern.href = doel;
+  extern.target = "_blank";
+  extern.rel = "noopener noreferrer";
+  extern.textContent = "Open de verkenner ↗";
+  /* De hoofdknop vóór de knop om in te bedden: in een eigen tabblad is een product van 35 MB,
+     of met een eigen bediening, het prettigst te gebruiken. */
+  knoppen.prepend(extern);
+
+  const selectie = document.createElement("span");
+  selectie.className = "selectie";
+  selectie.textContent = link
+    ? `opent met ${link.selectie} geselecteerd`
+    : "dit product kent geen selectie voor dit gebied; de link opent de stadskaart";
+  knoppen.appendChild(selectie);
+  tekst.appendChild(knoppen);
+
+  const foot = document.createElement("div");
+  foot.className = "foot";
+  foot.textContent =
+    `Bron: ${v.bron}` + (v.peiljaar ? ` (${v.peiljaar})` : "") +
+    ` · niveau: ${v.niveau}. ${v.caveat} ` +
+    "Dit is een apart product met een eigen bouw en eigen bronnen; de cijfers komen niet " +
+    "uit deze pipeline en dragen dus niet de aggregatieverantwoording van dit dashboard. " +
+    `Zonder internet blijft het leeg: ${v.url}`;
+  box.appendChild(foot);
+
+  sec.appendChild(box);
+
+  /* "Meer details" bij de grafieken waar de vraag leeft (#98). De ankers komen uit de registry
+     (scripts/viewers.py), niet uit een lijst hier. Een regel en geen tweede kaart: de lezer
+     moet weten dat er een diepere verkenner is, niet twee keer dezelfde uitleg lezen. Een
+     anker dat niet (meer) bestaat, meldt zich in de console en valt verder weg. */
+  for (const anker of v.ankers || []) {
+    const doelBlok = document.querySelector(`[data-onderwerp="${anker}"]`);
+    if (!doelBlok) { console.warn(`[viewer] anker ${anker} bestaat niet voor ${v.naam}`); continue; }
+    const regel = document.createElement("div");
+    regel.className = "meer-details";
+    regel.dataset.viewerAnker = v.sleutel;
+    const a = document.createElement("a");
+    a.href = doel; a.target = "_blank"; a.rel = "noopener";
+    a.textContent = `Meer details → ${v.naam}`;
+    regel.appendChild(a);
+    regel.appendChild(document.createTextNode(
+      " (extern product, opent in een nieuw tabblad" +
+      (link ? `; selectie: ${link.selectie})` : "; toont heel Rotterdam)")));
+    const voet = doelBlok.querySelector(":scope > .foot");
+    if (voet) voet.before(regel); else doelBlok.appendChild(regel);
+  }
+}
 });
 
 
@@ -3185,6 +4719,25 @@ document.querySelectorAll("#buurtToggle button").forEach(btn => {
 for (const s of secties) {
   if (s.nr) index.push({naam: s.naam, waar: `sectie ${s.nr}`, sectie: s.id, doel: s.el});
 }
+/* Subsecties (#112): sectie 06 is opgesplitst per thema. Ze komen in het zoekvak en in een
+   rij knoppen bovenaan hun sectie. Niet in de sectiebalk zelf: die moet op een telefoon op
+   één regel blijven passen, en vijf extra items rekenen dat niet. */
+const subNaam = sub => [...(sub.querySelector("h3")?.childNodes || [])]
+  .filter(n => n.nodeType === 3).map(n => n.nodeValue).join(" ").replace(/\s+/g, " ").trim();
+for (const s of secties) {
+  const subs = [...s.el.querySelectorAll(":scope > .subsectie")].filter(sub => sub.id && subNaam(sub));
+  subs.forEach(sub => index.push({naam: subNaam(sub), waar: `sectie ${s.nr}`, sectie: s.id, doel: sub}));
+  const rij = s.el.querySelector(":scope > .subnav");
+  if (!rij || !subs.length) continue;
+  subs.forEach(sub => {
+    const a = document.createElement("a");
+    a.href = "#";
+    a.textContent = subNaam(sub);
+    /* springNaar staat hieronder als functiedeclaratie en is dus al beschikbaar */
+    a.addEventListener("click", ev => { ev.preventDefault(); springNaar(sub); });
+    rij.appendChild(a);
+  });
+}
 
 const zoekveld = wrap.querySelector("input");
 let lijst = null;
@@ -3241,6 +4794,8 @@ if (gebiedsbalk) gebiedsbalk.after(balk); else document.body.insertBefore(balk, 
 function plaatsBalk() {
   const h = gebiedsbalk ? gebiedsbalk.offsetHeight : 0;
   balk.style.top = h + "px";
+  /* De subsectierijen (#136) kleven onder beide balken. */
+  document.querySelectorAll(".subnav").forEach(r => { r.style.top = (h + balk.offsetHeight) + "px"; });
   return h + balk.offsetHeight;
 }
 let vasteHoogte = plaatsBalk();
@@ -3252,7 +4807,10 @@ function springNaar(doel) {
   /* Zelf rekenen in plaats van scrollIntoView: die schuift het doel onder de twee sticky
      balken, en dan lijkt het alsof je op de verkeerde plek bent aangekomen. */
   const soepel = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const y = el.getBoundingClientRect().top + window.scrollY - vasteHoogte - 8;
+  /* Binnen een sectie met een zwevende subsectierij valt die ook nog over het doel heen. */
+  const rij = el.closest("section")?.querySelector(":scope > .subnav");
+  const extra = rij && rij.offsetHeight && el !== el.closest("section") ? rij.offsetHeight : 0;
+  const y = el.getBoundingClientRect().top + window.scrollY - vasteHoogte - extra - 8;
   window.scrollTo({top: Math.max(0, y), behavior: soepel ? "smooth" : "instant"});
   /* De reveal-animatie zet nieuwe blokken op opacity:0 tot ze in beeld komen. Bij een sprong
      is het doel per definitie in beeld, dus meteen aanzetten — anders spring je naar iets
@@ -3278,6 +4836,26 @@ if ("IntersectionObserver" in window) {
     if (eerste) linkVan[eerste.id].scrollIntoView({block: "nearest", inline: "nearest"});
   }, {rootMargin: `-${vasteHoogte + 10}px 0px -55% 0px`});
   secties.forEach(s => obs.observe(s.el));
+
+  /* Welke subsectie is in beeld (#136)? Zelfde aanpak als bij de secties, met de zwevende rij
+     erbij als bovengrens. */
+  document.querySelectorAll("section > .subnav").forEach(rij => {
+    const subs = [...rij.parentElement.querySelectorAll(":scope > .subsectie")];
+    const links = [...rij.querySelectorAll("a")];
+    if (!subs.length || subs.length !== links.length) return;
+    const inBeeld = new Set();
+    const subObs = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        if (e.isIntersecting) inBeeld.add(e.target); else inBeeld.delete(e.target);
+      }
+      const eerste = subs.findIndex(sb => inBeeld.has(sb));
+      links.forEach((a, i) => {
+        if (i === eerste) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
+      });
+      if (eerste >= 0) links[eerste].scrollIntoView({block: "nearest", inline: "nearest"});
+    }, {rootMargin: `-${vasteHoogte + rij.offsetHeight + 10}px 0px -55% 0px`});
+    subs.forEach(sb => subObs.observe(sb));
+  });
 }
 });
 
@@ -3734,17 +5312,17 @@ if (typeof ONGEVALLEN !== "undefined" && !ONGEVALLEN.leeg) {
 
 /* CBS 100 m-vierkanten en luchtkwaliteit zijn WMS-lagen: die zijn licht om aan te zetten,
    want de server tekent ze. Alleen de nieuwste PDOK-jaargang, zoals de kaart in sectie 02. */
-/* Registreren zonder op wmsJaar te wachten: dat wordt asynchroon gevonden en is op dit moment
+/* Registreren zonder op de jaargang (cbsWms) te wachten: dat wordt asynchroon gevonden en is op dit moment
    nog null. De jaargang wordt pas gebruikt bij het aanzetten van de laag, en ontbreekt hij dan
    nog, dan zegt de melding dat — in plaats van dat de laag stil afwezig is. */
 bouwers["CBS 100 m: inwoners"] = () => {
-  if (typeof wmsJaar === "undefined" || !wmsJaar) {
+  if (!cbsWms) {
     /* De jaargang wordt bij het laden van de pagina opgezocht en dat duurt een paar seconden.
        Niet als gebouwd markeren, dus een tweede klik probeert het opnieuw. */
     throw new Error("PDOK-jaargang nog niet gevonden — probeer het over een paar seconden " +
       "opnieuw, of PDOK is niet bereikbaar");
   }
-  return L.tileLayer.wms(wmsUrl(), {
+  return L.tileLayer.wms(cbsWms.url("cbsvierkant100m_aantal_inwoners"), {
     layers: "vierkant_100m", styles: "cbsvierkant100m_aantal_inwoners",
     format: "image/png", transparent: true, opacity: .6,
     attribution: "CBS vierkantstatistieken via PDOK (CC BY 4.0)",
@@ -3799,8 +5377,14 @@ document.getElementById("alleslaagFoot").textContent =
   "hierboven, met peiljaar en caveat per laag.";
 box.hidden = false;
 /* Leaflet berekent zijn afmetingen bij het aanmaken; het kaartje zat toen nog in een
-   verborgen blok. Zonder dit blijft de kaart een grijs vlak tot je het venster verschaalt. */
-setTimeout(() => kaart.invalidateSize(), 0);
+   verborgen blok. Zonder dit blijft de kaart een grijs vlak tot je het venster verschaalt.
+   En opnieuw passend maken: de fitBounds hierboven rekende met een kaart van 0 × 0 px en
+   kwam daardoor uit op zoom 19, een paar straten groot. Daar tekent een WMS-laag niets
+   (Leaflet stopt bij zoom 18), dus de 100 m-laag leek ook na #115 niet te laden. */
+setTimeout(() => {
+  kaart.invalidateSize();
+  kaart.fitBounds(grens.getBounds(), {padding: [12, 12]});
+}, 0);
 });
 
 
@@ -3833,8 +5417,10 @@ function toon(sleutel) {
   const punten = r.waarden.map((w, i) => (r.volledig[i] === false && w !== null) ? w : w);
   /* Een jaar waarin niet alle wijken een cijfer hebben is een ondergrens. Dat markeren met een
      open stip: de waarde staat er, maar hij rust op minder wijken dan de rest van de reeks. */
+  /* Gevuld geel met een zwarte rand, zoals het eigen gebied in elke andere grafiek (#130); dat
+     was hier zwart, en dan leest de reeks als een referentie in plaats van als het onderwerp. */
   const stijl = r.waarden.map((w, i) =>
-    w === null ? "transparent" : (r.volledig[i] === false ? "#FAFAF5" : ASFALT));
+    w === null ? "transparent" : (r.volledig[i] === false ? "#FAFAF5" : GEEL));
   if (grafiek) grafiek.destroy();
   grafiek = new Chart(canvas, {
     type: "line",
@@ -4073,6 +5659,356 @@ document.getElementById("segmentenFoot").innerHTML =
       (agg.intervalWeggelaten ? ` <b>${agg.intervalWeggelaten}</b>` : "")
     : "");
 box.hidden = false;
+});
+
+veilig("odin-badges", () => {
+/* ---------- een steekproeflabel bij elk ODiN-cijfer, waar het ook staat (#97) ----------
+   De representativiteitswaarschuwing stond alleen in sectie 07, terwijl de
+   zelfvoorzienendheid in sectie 01 — inmiddels een hoofdindicator (#49) — uit dezelfde
+   steekproef komt. Wie alleen de bovenkant leest, zag een ODiN-percentage zonder voorbehoud.
+
+   Welke blokken ODiN tonen staat als data-bron="odin" op het blok zelf in index.html, naast
+   de grafiek en niet in een lijst hier: een nieuwe ODiN-grafiek krijgt het label door één
+   attribuut, en de rooktest telt of elk gemarkeerd blok het ook echt heeft
+   (data-odin-badge). Onderaan het bestand, zodat blokken die hun kop pas tijdens het opbouwen
+   vullen het label niet overschrijven. */
+const blokken = document.querySelectorAll('[data-bron~="odin"]');
+const heeftData = typeof ODINW !== "undefined" && !ODINW.leeg && ODINW.n;
+blokken.forEach(blok => {
+  /* Zonder ODiN-data verwijdert odin-caveat de grafieken al en blijft de zelfvoorzienendheid
+     verborgen. Het merkteken zegt dan dat het blok gezien is, niet dat er een label staat. */
+  if (!heeftData) { blok.dataset.odinBadge = "geen-data"; return; }
+  /* De bezoekers zijn een andere steekproef dan de bewoners — niet-bewoners met een
+     bestemming in het gebied — dus daar hoort hun eigen aantal bij. */
+  const bezoekers = blok.dataset.odinN === "bezoekers";
+  const n = bezoekers ? (ODINW.bezoekers || {}).n : ODINW.n.verplaatsingen;
+  const wat = bezoekers ? "verplaatsingen van bezoekers" : "verplaatsingen";
+  const label = document.createElement("a");
+  label.className = "status odin";
+  label.href = "#odinCaveat";
+  label.textContent = n != null
+    ? `ODiN · steekproef · n = ${n.toLocaleString("nl-NL")}` : "ODiN · steekproef";
+  label.title = `Uit de ODiN-steekproef (${ODINW.peildatum})` +
+    (n != null ? `, ${n.toLocaleString("nl-NL")} ${wat}` : "") +
+    ". Indicatief; zie de representativiteit bovenaan sectie 07.";
+  const kop = /^H[1-4]$/.test(blok.tagName) ? blok : blok.querySelector("h3, h4");
+  if (kop) kop.append(" ", label);
+  else blok.prepend(label);
+  blok.dataset.odinBadge = "ja";
+});
+});
+
+veilig("uitleg-intensiteit", () => {
+/* ---------- #146/#150: wat betekent een etmaalintensiteit? ----------
+   "10.000 mvt/etmaal" zegt de meeste lezers niets, en omrekenen naar "per uur" of "per minuut"
+   (de eerste versie, #146) zegt nauwelijks meer: het blijft een rekensom. Dit blok laat het getal
+   voelen op vier manieren die iedereen kent:
+   - een straat waar de voertuigen in echte tijd langskomen, in het tempo van het drukste uur;
+   - hoe lang je gemiddeld wacht op een gat om over te steken;
+   - hoe lang de file is als je alle voertuigen van één etmaal achter elkaar zet;
+   - hoe het getal zich verhoudt tot alle personenauto's van het eigen gebied.
+   Alles volgt uit één getal plus één aanname (het aandeel van het drukste uur, 8–10 %, instelbaar).
+   Geen data nodig, behalve voor het laatste paneel.
+
+   Rekenaanname voor de straat en het oversteken: voertuigen komen onafhankelijk van elkaar
+   (Poisson). Dat is de standaardaanname voor ongeregeld verkeer. Een verkeerslicht verderop maakt
+   er groepjes van, met langere gaten ertussen — dan valt de wachttijd in werkelijkheid korter uit.
+   Dat staat in de voetnoot.
+
+   De maatlat met wegtypen is een orde van grootte om het getal te plaatsen, geen norm en geen
+   oordeel — daarom één neutrale kleur (#30). */
+const box = document.getElementById("intUitleg");
+if (!box) return;
+const schuif = document.getElementById("intSchuif");
+const spits = document.getElementById("intSpits");
+const knoppen = box.querySelector(".intknoppen");
+const SNEL = [100, 1000, 10000, 50000];
+const LOG_MIN = 2, LOG_MAX = 5;
+/* Indicatief, afgerond, per wegtype. Ranges overlappen bewust: het wegtype bepaalt het getal niet. */
+const BANDEN = [
+  {naam: "woonstraat", van: 100, tot: 2000},
+  {naam: "wijkontsluitingsweg", van: 3000, tot: 15000},
+  {naam: "stedelijke hoofdweg", van: 12000, tot: 40000},
+  {naam: "snelweg", van: 40000, tot: 100000},
+];
+/* Oversteektijd: 5 s is een volwassene over een rijbaan van ca. 7 m (1,4 m/s); 8 s een kind,
+   iemand met een rollator of met boodschappen. */
+const GATEN = [{t: 5, wie: "een volwassene"}, {t: 8, wie: "een kind of iemand die langzaam loopt"}];
+/* Eén voertuig in een file: 4,5 m auto plus 1,5 m tussenruimte. Vrachtwagens en bussen maken de
+   file langer; dit is dus een ondergrens. */
+const M_PER_VOERTUIG = 6;
+/* Hemelsbreed vanaf Rotterdam Centraal; de afstand wordt hieronder uitgerekend, niet getypt. */
+const RCS = [51.9244, 4.4690];
+function kmTussen([la1, lo1], [la2, lo2]) {
+  const r = Math.PI / 180, dla = (la2 - la1) * r, dlo = (lo2 - lo1) * r;
+  const h = Math.sin(dla / 2) ** 2 + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.sin(dlo / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
+}
+const PLAATSEN = [
+  ["Schiedam", 51.9217, 4.4094], ["Delft", 52.0067, 4.3569], ["Dordrecht", 51.8079, 4.6684],
+  ["Gouda", 52.0172, 4.7048], ["Den Haag", 52.0802, 4.3249], ["Leiden", 52.1664, 4.4819],
+  ["Breda", 51.5955, 4.7800], ["Utrecht", 52.0894, 5.1101], ["Amsterdam", 52.3789, 4.9003],
+  ["Antwerpen", 51.2172, 4.4211], ["Eindhoven", 51.4433, 5.4814], ["Brussel", 50.8456, 4.3571],
+  ["Groningen", 53.2105, 6.5641], ["Parijs", 48.8809, 2.3553],
+].map(([naam, la, lo]) => ({naam, km: kmTussen(RCS, [la, lo])})).sort((a, b) => a.km - b.km);
+const OMTREK_AARDE_KM = 40075;
+
+const nlGetal = (v, dec = 0) => v.toLocaleString("nl-NL", {maximumFractionDigits: dec});
+/* Een duur leesbaar: seconden, minuten of uren, met één cijfer achter de komma waar dat telt. */
+function duur(s) {
+  if (s < 1) return "minder dan een seconde";
+  if (s < 90) return `${nlGetal(s, s < 10 ? 1 : 0)} seconden`;
+  if (s < 5400) return `${nlGetal(s / 60, s < 600 ? 1 : 0)} minuten`;
+  return `${nlGetal(s / 3600, s < 36000 ? 1 : 0)} uur`;
+}
+let huidig = null;
+const pos = n => 100 * (Math.log10(n) - LOG_MIN) / (LOG_MAX - LOG_MIN);
+
+SNEL.forEach(n => {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = nlGetal(n); b.dataset.n = n;
+  b.addEventListener("click", () => toon(n));
+  knoppen.appendChild(b);
+});
+
+/* maatlat: banden en tikken één keer tekenen, de wijzer schuift mee */
+const lat = document.getElementById("intLat");
+lat.innerHTML = BANDEN.map((bd, i) =>
+  `<div class="band" style="left:${pos(bd.van)}%;width:${pos(bd.tot) - pos(bd.van)}%;` +
+  `top:${i % 2 ? 24 : 0}px" title="${bd.naam}: ca. ${nlGetal(bd.van)}–${nlGetal(bd.tot)}">` +
+  `${bd.naam}</div>`).join("") +
+  [100, 1000, 10000, 100000].map(t => `<div class="tik" style="left:${pos(t)}%">${nlGetal(t)}</div>`).join("") +
+  '<div class="wijzer"><span></span></div>';
+const wijzer = lat.querySelector(".wijzer");
+
+/* ---------- de straat: voertuigen in echte tijd ----------
+   Twee rijstroken, elk met de helft van de intensiteit. Een voertuig doet 5 s over het beeld
+   (70 m bij 50 km/u); korter, en bij 10.000 per etmaal is de straat meestal leeg in beeld. Aankomsten per strook zijn Poisson, maar nooit dichter op elkaar dan een
+   voertuiglengte plus een halve seconde: anders schuiven ze bij 50.000 door elkaar. */
+const doek = document.getElementById("intStraat");
+const ctx = doek.getContext("2d");
+const BEELD_M = 70, OVERSTEEK_S = 5;
+const SOORTEN = [{kans: .88, l: 4.5, h: 1.8}, {kans: .08, l: 6, h: 2}, {kans: .04, l: 12, h: 2.5}];
+const stilVoorkeur = !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+const kleur = naam => getComputedStyle(document.documentElement).getPropertyValue(naam).trim();
+let stroken = [], simTijd = 0, geteld = 0, factor = 1, gepauzeerd = stilVoorkeur, zichtbaar = true;
+let laatsteFrame = null, qPerS = 0;
+const expo = rate => rate > 0 ? -Math.log(1 - Math.random()) / rate : Infinity;
+function soort() {
+  let r = Math.random();
+  for (const s of SOORTEN) { if ((r -= s.kans) <= 0) return s; }
+  return SOORTEN[0];
+}
+function resetStraat() {
+  simTijd = 0; geteld = 0;
+  /* Begin met een gevulde straat, niet met een lege: plaats voertuigen alsof het al liep. */
+  stroken = [0, 1].map(richting => {
+    const s = {richting, voertuigen: [], volgende: 0};
+    let t = -OVERSTEEK_S;
+    for (;;) {
+      t += expo(qPerS / 2);
+      if (t >= 0) break;
+      s.voertuigen.push({start: t, ...soort()});
+    }
+    s.volgende = t;
+    return s;
+  });
+}
+function stap(dt) {
+  simTijd += dt;
+  for (const s of stroken) {
+    while (s.volgende <= simTijd) {
+      const v = {start: s.volgende, ...soort()};
+      const vorige = s.voertuigen[s.voertuigen.length - 1];
+      if (vorige) v.start = Math.max(v.start, vorige.start + (vorige.l / BEELD_M) * OVERSTEEK_S + .5);
+      s.voertuigen.push(v);
+      geteld++;
+      s.volgende = v.start + expo(qPerS / 2);
+    }
+    s.voertuigen = s.voertuigen.filter(v => simTijd - v.start < OVERSTEEK_S * 1.6);
+  }
+}
+function teken() {
+  const b = doek.clientWidth, h = doek.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (!b || !h) return;
+  if (doek.width !== Math.round(b * dpr)) { doek.width = Math.round(b * dpr); doek.height = Math.round(h * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, b, h);
+  const pxm = b / BEELD_M, midden = h / 2;
+  /* stoepranden en middenstreep */
+  ctx.fillStyle = kleur("--grid") || "#ccc";
+  ctx.fillRect(0, 10, b, 2); ctx.fillRect(0, h - 12, b, 2);
+  ctx.strokeStyle = kleur("--asfalt-zacht") || "#777"; ctx.setLineDash([12, 10]); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(0, midden); ctx.lineTo(b, midden); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = kleur("--asfalt") || "#222";
+  for (const s of stroken) {
+    for (const v of s.voertuigen) {
+      const af = (simTijd - v.start) / OVERSTEEK_S;                // 0 = binnenkomst
+      const kop = af * (BEELD_M + v.l) * pxm;                       // voorkant in px vanaf de rand
+      const x = s.richting ? kop - v.l * pxm : b - kop;
+      const y = s.richting ? midden + 8 : midden - 8 - v.h * pxm;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x, y, v.l * pxm, v.h * pxm, 3);
+      else ctx.rect(x, y, v.l * pxm, v.h * pxm);
+      ctx.fill();
+    }
+  }
+}
+function tekstTeller() {
+  const s = simTijd;
+  const tijd = s < 60 ? `${Math.floor(s)} s` : `${Math.floor(s / 60)} min ${Math.floor(s % 60)} s`;
+  document.getElementById("intTeller").textContent = gepauzeerd && stilVoorkeur && s === 0
+    ? "De animatie staat uit volgens je systeeminstelling; druk op ‘start’ om ze te laten lopen."
+    : `In ${tijd}${factor > 1 ? " (versneld)" : ""} kwamen hier ${nlGetal(geteld)} ` +
+      `voertuig${geteld === 1 ? "" : "en"} langs.`;
+}
+function frame(t) {
+  if (laatsteFrame != null && !gepauzeerd && zichtbaar) {
+    stap(Math.min(.1, (t - laatsteFrame) / 1000) * factor);
+    teken(); tekstTeller();
+  }
+  laatsteFrame = t;
+  requestAnimationFrame(frame);
+}
+/* Buiten beeld stil: een animatie die niemand ziet, kost alleen batterij. */
+if ("IntersectionObserver" in window) {
+  new IntersectionObserver(e => { zichtbaar = e[0].isIntersecting; }).observe(doek);
+}
+const knopVersneld = document.getElementById("intVersneld");
+const knopPauze = document.getElementById("intPauze");
+knopVersneld.addEventListener("click", () => {
+  factor = factor > 1 ? 1 : 10;
+  knopVersneld.setAttribute("aria-pressed", String(factor > 1));
+});
+const zetPauze = p => {
+  gepauzeerd = p;
+  knopPauze.setAttribute("aria-pressed", String(p));
+  knopPauze.textContent = p ? "start" : "pauze";
+};
+knopPauze.addEventListener("click", () => zetPauze(!gepauzeerd));
+zetPauze(gepauzeerd);
+
+/* ---------- het eigen gebied: personenauto's ≈ huishoudens × auto's per huishouden ---------- */
+const eigenAutos = (() => {
+  if (typeof PROFIEL === "undefined") return null;
+  const hh = PROFIEL.kerncijfers?.huishoudens;
+  const reeks = PROFIEL.reeksen?.autos?.waarden || [];
+  const perHh = [...reeks].reverse().find(v => v != null);
+  return hh && perHh ? hh * perHh : null;
+})();
+const rond100 = v => nlGetal(Math.round(v / 100) * 100);
+
+function toon(n, {straatOpnieuw = true} = {}) {
+  n = Math.max(10 ** LOG_MIN, Math.min(10 ** LOG_MAX, Math.round(n)));
+  const nieuwGetal = n !== huidig;
+  huidig = n;
+  const aandeel = Number(spits.value) / 100;
+  const piek = n * aandeel;              // voertuigen in het drukste uur, beide richtingen
+  qPerS = piek / 3600;
+  schuif.value = String(Math.log10(n));
+  document.getElementById("intWaarde").textContent = nlGetal(n);
+  document.getElementById("intSpitsWaarde").textContent = `${nlGetal(aandeel * 100, 1)}%`;
+  knoppen.querySelectorAll("button").forEach(b =>
+    b.setAttribute("aria-pressed", String(Number(b.dataset.n) === n)));
+
+  /* straat */
+  const tussen = 3600 / piek;
+  document.getElementById("intLiveKop").textContent =
+    `Zo ziet ${nlGetal(n)} per etmaal eruit in het drukste uur: gemiddeld elke ` +
+    `${duur(tussen)} een voertuig, in echte tijd.`;
+  doek.setAttribute("aria-label",
+    `Animatie van een straat met gemiddeld elke ${duur(tussen)} een voertuig`);
+  if ((nieuwGetal && straatOpnieuw) || !stroken.length) resetStraat();
+  teken(); tekstTeller();
+
+  /* oversteken: verwachte wachttijd op een gat van T seconden, E = (e^(qT) − 1 − qT) / q */
+  document.getElementById("intOversteek").innerHTML = GATEN.map(({t, wie}) => {
+    const qt = qPerS * t;
+    const wacht = qPerS > 0 ? (Math.exp(qt) - 1 - qt) / qPerS : 0;
+    const kans = Math.exp(-qt);
+    return `<div class="intrij"><div class="intgroot">${wacht < 1 ? "direct" : duur(wacht)}</div>` +
+      `<div class="intklein">gemiddeld wachten voor ${wie} (${t} s nodig). ` +
+      `${kans < .001 ? "minder dan 0,1" : nlGetal(100 * kans, kans < .1 ? 1 : 0)}% van de gaten is lang genoeg.` +
+      (wacht > 1800 ? " Zonder verkeerslicht of oversteekplaats komt er in de praktijk geen gat." : "") +
+      `</div></div>`;
+  }).join("");
+
+  /* file */
+  const km = n * M_PER_VOERTUIG / 1000;
+  const voorbij = [...PLAATSEN].reverse().find(p => p.km <= km);
+  const verder = PLAATSEN.find(p => p.km > km) || PLAATSEN[PLAATSEN.length - 1];
+  const schaal = Math.max(km, verder.km) * 1.05;
+  const perJaar = km * 365;
+  document.getElementById("intFile").innerHTML =
+    `<div class="intgroot">${nlGetal(km, km < 10 ? 1 : 0)} km</div>` +
+    `<div class="intklein">${voorbij
+      ? `hemelsbreed van Rotterdam Centraal tot voorbij ${voorbij.naam} (${nlGetal(voorbij.km)} km)`
+      : `minder dan van Rotterdam Centraal tot ${PLAATSEN[0].naam} (${nlGetal(PLAATSEN[0].km)} km)`}` +
+    `</div><div class="intfilebalk" aria-hidden="true"><b style="width:${100 * km / schaal}%"></b>` +
+    /* Alleen de plaats die je voorbij bent en de volgende, en die tweede alleen als de labels
+       elkaar niet raken (Amsterdam en Antwerpen liggen 20 km uit elkaar). */
+    [voorbij, verder].filter((p, i) => p && (i === 0 || !voorbij ||
+      (verder.km - voorbij.km) / schaal > .22)).map((p, i) =>
+      `<i style="left:${100 * p.km / schaal}%"><span style="${p === verder ? "right:0;left:auto" : ""}">` +
+      `${p.naam}</span></i>`).join("") + `</div>` +
+    `<div class="intklein">Een jaar lang elke dag zo: ${nlGetal(perJaar)} km` +
+    (perJaar >= OMTREK_AARDE_KM / 10
+      ? `, ${nlGetal(perJaar / OMTREK_AARDE_KM, 1)} keer de aarde rond.` : ".") + `</div>`;
+
+  /* eigen gebied */
+  const per = document.getElementById("intGebied");
+  const jaar = `<div class="intklein" style="margin-top:8px">Per jaar: ` +
+    `${nlGetal(n * 365 / 1e6, n * 365 < 1e7 ? 1 : 0)} miljoen passages langs dat ene punt.</div>`;
+  if (eigenAutos) {
+    const r = n / eigenAutos;
+    document.getElementById("intGebiedKop").textContent = `Tegen ${GEBIEDNAAM}`;
+    per.innerHTML =
+      `<div class="intgroot">${r >= 1 ? `${nlGetal(r, r < 10 ? 1 : 0)}×` : `${nlGetal(100 * r, r < .1 ? 1 : 0)}%`}</div>` +
+      `<div class="intklein">${r >= 1
+        ? `alle personenauto's van ${GEBIEDNAAM} (ongeveer ${rond100(eigenAutos)}), zo vaak op één dag langs één punt`
+        : `van alle ongeveer ${rond100(eigenAutos)} personenauto's van ${GEBIEDNAAM}, op één dag langs één punt`}.</div>` + jaar;
+  } else {
+    per.innerHTML = jaar;
+  }
+
+  wijzer.style.left = `${pos(n)}%`;
+  wijzer.querySelector("span").textContent = nlGetal(n);
+  /* rechts van het midden het label links van de wijzer, anders loopt het buiten de maatlat */
+  wijzer.querySelector("span").style.left = pos(n) > 70 ? "auto" : "5px";
+  wijzer.querySelector("span").style.right = pos(n) > 70 ? "5px" : "auto";
+}
+/* Voor een kaart die een wegvak kan aanklikken: toonIntensiteit(n) zet het getal hier. */
+window.toonIntensiteit = n => { toon(n); };
+
+schuif.addEventListener("input", () => toon(10 ** Number(schuif.value)));
+/* Het drukste-uuraandeel verandert het tempo, niet het getal: de straat loopt door. */
+spits.addEventListener("input", () => toon(huidig, {straatOpnieuw: false}));
+window.addEventListener("resize", () => teken());
+document.getElementById("intFoot").textContent =
+  "Rekenregels. Drukste uur = etmaal × het gekozen aandeel (vuistregel 8–10 %), beide richtingen " +
+  "samen. Straat en oversteken nemen aan dat voertuigen onafhankelijk van elkaar komen (Poisson); " +
+  "de verwachte wachttijd op een gat van T seconden bij q voertuigen per seconde is " +
+  "(e^(qT) − 1 − qT) ÷ q. Een verkeerslicht in de buurt bundelt verkeer in groepjes met langere " +
+  "gaten, en een middenberm halveert wat je in één keer oversteekt; dan wacht je korter. File: 6 m " +
+  "per voertuig (auto plus tussenruimte), afstanden hemelsbreed. Personenauto's van het gebied ≈ " +
+  "huishoudens × auto's per huishouden (CBS, op één decimaal gepubliceerd, dus een benadering). " +
+  "De wegtypen zijn een indicatieve orde van grootte, geen norm of streefwaarde. Een kaart die per " +
+  "rijrichting telt, geeft voor een tweerichtingsweg ongeveer de helft van het etmaal van beide " +
+  "richtingen samen.";
+toon(1000);
+requestAnimationFrame(frame);
+});
+
+veilig("paginabreedte", () => {
+/* ---------- steekt er iets buiten het scherm? (#114) ----------
+   Op een telefoon van 390 px was de pagina 651 px breed: een knoppenrij en vijf tabellen
+   rekten hem op, en de lezer moest zijwaarts schuiven om een grafiek te zien. Dat valt niet op
+   bij een desktop-rooktest. Daarom meet de pagina het zelf en zet het in de DOM; de rooktest
+   faalt erop, en een dump bij telefoonbreedte laat het zien. Onderaan, na de blokken die
+   tabellen en knoppen vullen. */
+const W = document.documentElement.clientWidth;
+const breed = document.documentElement.scrollWidth;
+document.body.dataset.paginabreedte = `${breed}/${W}`;
 });
 
 veilig("referentiekeuze", () => {
